@@ -1,0 +1,1 @@
+"""DDoS detector wrapper placeholder."""
