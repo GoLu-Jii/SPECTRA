@@ -1,1 +1,172 @@
-[]
+[
+  {
+    "alert_id": "ALT-2026-001",
+    "timestamp": "2026-09-02T14:32:05.120Z",
+    "flow_identifier": {
+      "src_ip": "192.168.10.45",
+      "dst_ip": "192.168.10.100",
+      "src_port": 54120,
+      "dst_port": 80,
+      "protocol": "TCP"
+    },
+    "threat_classification": {
+      "threat_class": "RECON_PORT_SCAN",
+      "mitre_tactic": "Discovery (TA0007)",
+      "mitre_technique_id": "T1046",
+      "mitre_technique_name": "Network Service Discovery"
+    },
+    "scoring": {
+      "confidence_score": 0.985,
+      "severity": "MEDIUM",
+      "anomaly_zscore": 3.92
+    },
+    "supporting_evidence": {
+      "unique_dst_ports_60s": 142,
+      "unanswered_syn_ratio": 0.94,
+      "avg_flow_duration_ms": 2.1,
+      "scan_type": "TCP SYN Vertical Scan"
+    }
+  },
+  {
+    "alert_id": "ALT-2026-002",
+    "timestamp": "2026-09-02T14:32:18.440Z",
+    "flow_identifier": {
+      "src_ip": "192.168.10.78",
+      "dst_ip": "192.168.10.1",
+      "src_port": 58312,
+      "dst_port": 53,
+      "protocol": "UDP"
+    },
+    "threat_classification": {
+      "threat_class": "DGA_DNS_TUNNELLING",
+      "mitre_tactic": "Command & Control (TA0011)",
+      "mitre_technique_id": "T1568.002",
+      "mitre_technique_name": "Domain Generation Algorithms"
+    },
+    "scoring": {
+      "confidence_score": 0.974,
+      "severity": "HIGH",
+      "anomaly_zscore": 4.65
+    },
+    "supporting_evidence": {
+      "queried_domain": "x9z8k1q4m0pl.biz",
+      "subdomain_entropy": 4.12,
+      "vowel_consonant_ratio": 0.08,
+      "nxdomain_burst_count": 86,
+      "unusual_record_type": "TXT"
+    }
+  },
+  {
+    "alert_id": "ALT-2026-003",
+    "timestamp": "2026-09-02T14:32:32.810Z",
+    "flow_identifier": {
+      "src_ip": "192.168.10.12",
+      "dst_ip": "198.51.100.24",
+      "src_port": 49830,
+      "dst_port": 443,
+      "protocol": "TCP"
+    },
+    "threat_classification": {
+      "threat_class": "BOTNET_C2_BEACONING",
+      "mitre_tactic": "Command & Control (TA0011)",
+      "mitre_technique_id": "T1071.001",
+      "mitre_technique_name": "Web Protocols: Beaconing"
+    },
+    "scoring": {
+      "confidence_score": 0.961,
+      "severity": "HIGH",
+      "anomaly_zscore": 4.88
+    },
+    "supporting_evidence": {
+      "observed_periodicity_sec": 60.08,
+      "interval_cv": 0.038,
+      "fft_dominant_frequency_hz": 0.0166,
+      "flow_byte_variance": 0.0,
+      "consecutive_beacons": 24
+    }
+  },
+  {
+    "alert_id": "ALT-2026-004",
+    "timestamp": "2026-09-02T14:32:45.920Z",
+    "flow_identifier": {
+      "src_ip": "192.168.10.89",
+      "dst_ip": "203.0.113.88",
+      "src_port": 51234,
+      "dst_port": 8443,
+      "protocol": "TCP"
+    },
+    "threat_classification": {
+      "threat_class": "TLS_QUIC_MALWARE",
+      "mitre_tactic": "Defense Evasion (TA0005)",
+      "mitre_technique_id": "T1573.002",
+      "mitre_technique_name": "Asymmetric Encrypted Channel"
+    },
+    "scoring": {
+      "confidence_score": 0.932,
+      "severity": "HIGH",
+      "anomaly_zscore": 3.75
+    },
+    "supporting_evidence": {
+      "ja4_fingerprint": "t13d1516h2_8daaf6152771_e562703ab853",
+      "ja4_known_malware_match": "Sliver_C2_Agent",
+      "deprecated_cipher_advertised": "TLS_RSA_WITH_AES_128_CBC_SHA",
+      "splt_first_10_sequence": [517, 1420, 1420, 85, 312, 1420]
+    }
+  },
+  {
+    "alert_id": "ALT-2026-005",
+    "timestamp": "2026-09-02T14:33:02.150Z",
+    "flow_identifier": {
+      "src_ip": "192.168.10.60",
+      "dst_ip": "198.51.100.99",
+      "src_port": 44102,
+      "dst_port": 443,
+      "protocol": "TCP"
+    },
+    "threat_classification": {
+      "threat_class": "DATA_EXFILTRATION",
+      "mitre_tactic": "Exfiltration (TA0010)",
+      "mitre_technique_id": "T1048.002",
+      "mitre_technique_name": "Exfiltration Over Asymmetric Non-C2 Protocol"
+    },
+    "scoring": {
+      "confidence_score": 0.968,
+      "severity": "CRITICAL",
+      "anomaly_zscore": 5.42
+    },
+    "supporting_evidence": {
+      "outbound_to_inbound_byte_ratio": 842.6,
+      "total_bytes_outbound_mb": 248.5,
+      "rolling_5m_host_volume_zscore": 5.1,
+      "outbound_packet_size_mean": 1460
+    }
+  },
+  {
+    "alert_id": "ALT-2026-006",
+    "timestamp": "2026-09-02T14:33:20.670Z",
+    "flow_identifier": {
+      "src_ip": "MULTI_SPOOFED_SOURCES",
+      "dst_ip": "192.168.10.100",
+      "src_port": 0,
+      "dst_port": 80,
+      "protocol": "TCP"
+    },
+    "threat_classification": {
+      "threat_class": "VOLUMETRIC_PROTOCOL_DDOS",
+      "mitre_tactic": "Impact (TA0040)",
+      "mitre_technique_id": "T1498.001",
+      "mitre_technique_name": "Direct Network Flood: SYN Flood"
+    },
+    "scoring": {
+      "confidence_score": 0.994,
+      "severity": "CRITICAL",
+      "anomaly_zscore": 7.89
+    },
+    "supporting_evidence": {
+      "ingest_packets_per_sec": 84200,
+      "source_ip_entropy": 7.92,
+      "syn_to_ack_ratio": 64.8,
+      "flood_duration_sec": 12.4
+    }
+  }
+]

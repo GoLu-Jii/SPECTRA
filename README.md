@@ -22,7 +22,7 @@ netspectra-sih/
 │   └── tls_malware/             # P2's workspace
 │
 ├── backend/                     # P3: Core FastAPI pipeline
-│   ├── main.py                  # API endpoints and WebSocket server
+│   ├── main.py                  # API endpoints and WebSocket servers
 │   ├── ingestor.py              # Tails zeek_logs/, extracts features, buffers time-windows
 │   ├── orchestrator.py          # Imports the 6 detectors, executes predictions
 │   ├── schemas.py               # Pydantic schemas standardizing the final JSON alert
