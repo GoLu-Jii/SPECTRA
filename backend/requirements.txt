@@ -1,1 +1,4 @@
-# Backend dependencies will be added here.
+# SPECTRA backend dependencies
+fastapi
+uvicorn[standard]
+pydantic
