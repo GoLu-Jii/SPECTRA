@@ -1,6 +1,7 @@
 import os
 import math
 import pickle
+import joblib
 
 from collections import defaultdict
 from pathlib import Path
@@ -932,34 +933,18 @@ class DDoSDetector:
         # LOAD MODEL
         # ----------------------------------------------------
 
-        with open(
-
-            self.model_path,
-
-            "rb"
-
-        ) as file:
-
-            self.model = pickle.load(
-                file
-            )
+        self.model = joblib.load(
+            self.model_path
+        )
 
 
         # ----------------------------------------------------
         # LOAD SCALER
         # ----------------------------------------------------
 
-        with open(
-
-            self.scaler_path,
-
-            "rb"
-
-        ) as file:
-
-            self.scaler = pickle.load(
-                file
-            )
+        self.scaler = joblib.load(
+            self.scaler_path
+        )
 
 
         # ----------------------------------------------------
