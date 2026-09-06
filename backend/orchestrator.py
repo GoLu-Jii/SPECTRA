@@ -1,7 +1,7 @@
 """Threat detector orchestration."""
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
 from ml_engine.interface import BaseThreatDetector, Prediction
@@ -10,6 +10,7 @@ from backend.schemas import (
 )
 from backend.ingestor import NormalizedEvent
 from backend.windowing import WindowConfig, WindowState, WindowManager
+from ml_engine.port_scanning.detector import PortScanDetector
 
 
 class DetectorRegistry:
@@ -58,6 +59,14 @@ class FeaturePreparer:
         Currently returns placeholder values.
         Real implementation will be provided by P1/P2 detectors.
         """
+        if isinstance(detector, PortScanDetector):
+            features: Dict[str, Any] = {}
+            for event in window.events:
+                features = detector.window.build_features(
+                    self._port_scan_event(event)
+                )
+            return features
+
         required = detector.metadata.required_features
         features: Dict[str, Any] = {}
 
@@ -67,6 +76,23 @@ class FeaturePreparer:
             features[feat] = 0.0
 
         return features
+
+    @staticmethod
+    def _port_scan_event(event: NormalizedEvent) -> Dict[str, Any]:
+        """Convert a normalized flow to the Port Scan detector input shape."""
+        start = datetime.fromtimestamp(event.ts)
+        duration = event.duration or 0.0
+        stop = start + timedelta(seconds=duration)
+        return {
+            "startDateTime": start.isoformat(),
+            "stopDateTime": stop.isoformat(),
+            "source": event.src_ip,
+            "destination": event.dst_ip,
+            "dst_port": event.dst_port,
+            "orig_pkts": event.orig_pkts,
+            "resp_pkts": event.resp_pkts,
+            "history": event.history,
+        }
 
 
 class AlertGenerator:
