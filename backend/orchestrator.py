@@ -1,6 +1,7 @@
 """Threat detector orchestration."""
 
 import uuid
+import importlib
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
@@ -13,6 +14,10 @@ from backend.windowing import WindowConfig, WindowState, WindowManager
 from ml_engine.ddos.ddo_detector import DDoSDetector
 from ml_engine.port_scanning.detector import PortScanDetector
 
+C2BeaconingDetector = importlib.import_module(
+    "ml_engine.C2 Beaconing.c2_beaconing_detector"
+).C2BeaconingDetector
+
 
 class DetectorRegistry:
     """Discovers and loads detectors at startup."""
@@ -24,6 +29,9 @@ class DetectorRegistry:
         """Register a detector instance."""
         if isinstance(detector, DDoSDetector):
             self._detectors["ddos"] = detector
+            return
+        if isinstance(detector, C2BeaconingDetector):
+            self._detectors["c2"] = detector
             return
         self._detectors[detector.metadata.name] = detector
 
@@ -98,6 +106,19 @@ class FeaturePreparer:
             "totalSourcePackets": event.orig_pkts or 0,
             "totalDestinationPackets": event.resp_pkts or 0,
             "sourceTCPFlagsDescription": event.history or "",
+        }
+
+    @staticmethod
+    def c2_event(event: NormalizedEvent) -> Dict[str, Any]:
+        """Convert a normalized flow to the C2 detector input shape."""
+        return {
+            "start_time_unix": event.ts,
+            "bytes": (event.orig_bytes or 0) + (event.resp_bytes or 0),
+            "pkts": (event.orig_pkts or 0) + (event.resp_pkts or 0),
+            "proto": event.proto,
+            "flow_dir_reverse": bool(event.raw.get("flow_dir_reverse", False)),
+            "src_ip": event.src_ip,
+            "dst_ip": event.dst_ip,
         }
 
     @staticmethod
@@ -215,6 +236,31 @@ class Orchestrator:
                         alerts.append(self.alert_generator.generate(prediction, event))
                     continue
 
+                if isinstance(detector, C2BeaconingDetector):
+                    completed_windows = self.window_manager.add_event(event, "c2")
+                    for window in completed_windows:
+                        if len(window.events) < 2:
+                            continue
+                        flows = sorted(
+                            (self.feature_preparer.c2_event(item) for item in window.events),
+                            key=lambda flow: float(flow["start_time_unix"]),
+                        )
+                        alert, confidence, evidence = detector.predict(flows)
+                        if alert:
+                            prediction = Prediction(
+                                threat_class="BOTNET_C2_BEACONING",
+                                confidence=float(confidence),
+                                severity=self._c2_severity(float(confidence)),
+                                anomaly_zscore=0.0,
+                                evidence={
+                                    **evidence,
+                                    "src_ip": window.events[0].src_ip,
+                                    "dst_ip": window.events[0].dst_ip,
+                                },
+                            )
+                            alerts.append(self.alert_generator.generate(prediction, event))
+                    continue
+
                 # Add event to window
                 completed_windows = self.window_manager.add_event(event, detector.metadata.name)
 
@@ -241,6 +287,16 @@ class Orchestrator:
             anomaly_zscore=0.0,
             evidence=result["evidence"],
         )
+
+    @staticmethod
+    def _c2_severity(confidence: float) -> str:
+        if confidence < 0.40:
+            return "LOW"
+        if confidence < 0.70:
+            return "MEDIUM"
+        if confidence < 0.90:
+            return "HIGH"
+        return "CRITICAL"
 
     def flush_windows(self) -> List[Alert]:
         """
