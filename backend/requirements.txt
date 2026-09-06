@@ -1,0 +1,4 @@
+# SPECTRA backend dependencies
+fastapi
+uvicorn[standard]
+pydantic
