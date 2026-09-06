@@ -2,6 +2,7 @@
 
 import uuid
 import importlib
+from dataclasses import replace
 from datetime import datetime, timedelta
 from typing import Dict, Any, List, Optional
 
@@ -13,6 +14,8 @@ from backend.ingestor import NormalizedEvent
 from backend.windowing import WindowConfig, WindowState, WindowManager
 from ml_engine.ddos.ddo_detector import DDoSDetector
 from ml_engine.port_scanning.detector import PortScanDetector
+from ml_engine.DNS_Tunelling.dns_tunnelling_detector import DNSTunnellingDetector
+from backend.dns_tunnelling_pcap import DNSPacket, build_dns_features
 
 C2BeaconingDetector = importlib.import_module(
     "ml_engine.C2 Beaconing.c2_beaconing_detector"
@@ -38,6 +41,9 @@ class DetectorRegistry:
             return
         if isinstance(detector, DGA_Detector):
             self._detectors["dga"] = detector
+            return
+        if isinstance(detector, DNSTunnellingDetector):
+            self._detectors["dns_tunnelling"] = detector
             return
         self._detectors[detector.metadata.name] = detector
 
@@ -126,6 +132,32 @@ class FeaturePreparer:
             "src_ip": event.src_ip,
             "dst_ip": event.dst_ip,
         }
+
+    @staticmethod
+    def dns_packet(event: NormalizedEvent) -> DNSPacket:
+        """Read packet-level DNS metadata preserved in a normalized event."""
+        packet = event.raw.get("dns_packet")
+        if isinstance(packet, DNSPacket):
+            return packet
+        if isinstance(packet, dict):
+            return DNSPacket(**packet)
+        raise ValueError("DNS event is missing raw dns_packet metadata")
+
+    @staticmethod
+    def dns_window_event(event: NormalizedEvent) -> NormalizedEvent:
+        """Canonicalize DNS endpoints for directional WindowManager keys."""
+        packet = FeaturePreparer.dns_packet(event)
+        if packet.is_request:
+            endpoints = (packet.src_ip, packet.src_port, packet.dst_ip, packet.dst_port)
+        else:
+            endpoints = (packet.dst_ip, packet.dst_port, packet.src_ip, packet.src_port)
+        return replace(
+            event,
+            src_ip=endpoints[0],
+            src_port=endpoints[1],
+            dst_ip=endpoints[2],
+            dst_port=endpoints[3],
+        )
 
     @staticmethod
     def _port_scan_event(event: NormalizedEvent) -> Dict[str, Any]:
@@ -282,6 +314,19 @@ class Orchestrator:
                         alerts.append(self.alert_generator.generate(prediction, event))
                     continue
 
+                if isinstance(detector, DNSTunnellingDetector):
+                    if event.log_type != "dns":
+                        continue
+                    window_event = self.feature_preparer.dns_window_event(event)
+                    completed_windows = self.window_manager.add_event(
+                        window_event, "dns_tunnelling"
+                    )
+                    for window in completed_windows:
+                        prediction = self._dns_prediction(detector, window)
+                        if prediction:
+                            alerts.append(self.alert_generator.generate(prediction, event))
+                    continue
+
                 # Add event to window
                 completed_windows = self.window_manager.add_event(event, detector.metadata.name)
 
@@ -329,6 +374,34 @@ class Orchestrator:
             return "HIGH"
         return "CRITICAL"
 
+    @staticmethod
+    def _dns_prediction(
+        detector: DNSTunnellingDetector,
+        window: WindowState,
+    ) -> Optional[Prediction]:
+        packets = [FeaturePreparer.dns_packet(event) for event in window.events]
+        features = build_dns_features(packets)
+        alert, confidence, evidence = detector.predict(features)
+        if not alert:
+            return None
+        return Prediction(
+            threat_class="DNS_TUNNELLING",
+            confidence=float(confidence),
+            severity=Orchestrator._confidence_severity(float(confidence)),
+            anomaly_zscore=0.0,
+            evidence=evidence,
+        )
+
+    @staticmethod
+    def _confidence_severity(confidence: float) -> str:
+        if confidence < 0.40:
+            return "LOW"
+        if confidence < 0.70:
+            return "MEDIUM"
+        if confidence < 0.90:
+            return "HIGH"
+        return "CRITICAL"
+
     def flush_windows(self) -> List[Alert]:
         """
         Flush all active windows and return any remaining alerts.
@@ -339,6 +412,15 @@ class Orchestrator:
         completed_windows = self.window_manager.flush_all()
         for window in completed_windows:
             for detector in self.detector_registry.all():
+                if isinstance(detector, DNSTunnellingDetector):
+                    if window.config.detector_name != "dns_tunnelling":
+                        continue
+                    prediction = self._dns_prediction(detector, window)
+                    if prediction and window.events:
+                        alerts.append(
+                            self.alert_generator.generate(prediction, window.events[0])
+                        )
+                    continue
                 if window.config.detector_name == detector.metadata.name:
                     features = self.feature_preparer.prepare(detector, window)
                     context = self._make_context_from_window(window)
