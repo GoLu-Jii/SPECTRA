@@ -57,14 +57,32 @@ class DGADetector:
 
     def __init__(
         self,
-        model_path: str | Path = "DGA_XGBoost.pkl",
+        model_path: str | Path | None = None,
         vectorizer: TfidfVectorizer | None = None,
-        english_dict: Iterable[str] = (),
+        english_dict: Iterable[str] | None = None,
+        vectorizer_path: str | Path | None = None,
+        dictionary_path: str | Path | None = None,
         threshold: float = THRESHOLD,
     ) -> None:
-        self.model = joblib.load(model_path)
-        self.vectorizer = vectorizer
-        self.english_dict = {word.lower() for word in english_dict}
+        base_dir = Path(__file__).parent
+        model_file = Path(model_path) if model_path else base_dir / "DGA_XGBoost.pkl"
+        vectorizer_file = (
+            Path(vectorizer_path)
+            if vectorizer_path
+            else base_dir / "dga_tfidf_vectorizer.joblib"
+        )
+        dictionary_file = (
+            Path(dictionary_path)
+            if dictionary_path
+            else base_dir / "dga_english_dict.joblib"
+        )
+        self.model = joblib.load(model_file)
+        self.vectorizer = vectorizer or joblib.load(vectorizer_file)
+        self.english_dict = (
+            {word.lower() for word in english_dict}
+            if english_dict is not None
+            else joblib.load(dictionary_file)
+        )
         self.threshold = threshold
 
     def transform(self, domains: Iterable[str]) -> pd.DataFrame:

@@ -17,6 +17,9 @@ from ml_engine.port_scanning.detector import PortScanDetector
 C2BeaconingDetector = importlib.import_module(
     "ml_engine.C2 Beaconing.c2_beaconing_detector"
 ).C2BeaconingDetector
+DGA_Detector = importlib.import_module(
+    "ml_engine.DGA.dga_detector"
+).DGADetector
 
 
 class DetectorRegistry:
@@ -32,6 +35,9 @@ class DetectorRegistry:
             return
         if isinstance(detector, C2BeaconingDetector):
             self._detectors["c2"] = detector
+            return
+        if isinstance(detector, DGA_Detector):
+            self._detectors["dga"] = detector
             return
         self._detectors[detector.metadata.name] = detector
 
@@ -261,6 +267,21 @@ class Orchestrator:
                             alerts.append(self.alert_generator.generate(prediction, event))
                     continue
 
+                if isinstance(detector, DGA_Detector):
+                    if event.log_type != "dns" or not event.query:
+                        continue
+                    alert, confidence, evidence = detector.predict(event.query)
+                    if alert:
+                        prediction = Prediction(
+                            threat_class="DGA_DOMAIN",
+                            confidence=float(confidence),
+                            severity=self._dga_severity(float(confidence)),
+                            anomaly_zscore=0.0,
+                            evidence={**evidence, "query": event.query},
+                        )
+                        alerts.append(self.alert_generator.generate(prediction, event))
+                    continue
+
                 # Add event to window
                 completed_windows = self.window_manager.add_event(event, detector.metadata.name)
 
@@ -290,6 +311,16 @@ class Orchestrator:
 
     @staticmethod
     def _c2_severity(confidence: float) -> str:
+        if confidence < 0.40:
+            return "LOW"
+        if confidence < 0.70:
+            return "MEDIUM"
+        if confidence < 0.90:
+            return "HIGH"
+        return "CRITICAL"
+
+    @staticmethod
+    def _dga_severity(confidence: float) -> str:
         if confidence < 0.40:
             return "LOW"
         if confidence < 0.70:
