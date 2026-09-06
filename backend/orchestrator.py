@@ -10,6 +10,7 @@ from backend.schemas import (
 )
 from backend.ingestor import NormalizedEvent
 from backend.windowing import WindowConfig, WindowState, WindowManager
+from ml_engine.ddos.ddo_detector import DDoSDetector
 from ml_engine.port_scanning.detector import PortScanDetector
 
 
@@ -21,6 +22,9 @@ class DetectorRegistry:
 
     def register(self, detector: BaseThreatDetector) -> None:
         """Register a detector instance."""
+        if isinstance(detector, DDoSDetector):
+            self._detectors["ddos"] = detector
+            return
         self._detectors[detector.metadata.name] = detector
 
     def get(self, name: str) -> Optional[BaseThreatDetector]:
@@ -76,6 +80,25 @@ class FeaturePreparer:
             features[feat] = 0.0
 
         return features
+
+    @staticmethod
+    def ddos_event(event: NormalizedEvent) -> Dict[str, Any]:
+        """Convert a normalized flow to the DDoS detector input shape."""
+        start = datetime.fromtimestamp(event.ts)
+        stop = start + timedelta(seconds=event.duration or 0.0)
+        return {
+            "startDateTime": start.isoformat(),
+            "stopDateTime": stop.isoformat(),
+            "source": event.src_ip,
+            "destination": event.dst_ip,
+            "protocolName": event.proto,
+            "direction": event.raw.get("direction") or "L2R",
+            "totalSourceBytes": event.orig_bytes or 0,
+            "totalDestinationBytes": event.resp_bytes or 0,
+            "totalSourcePackets": event.orig_pkts or 0,
+            "totalDestinationPackets": event.resp_pkts or 0,
+            "sourceTCPFlagsDescription": event.history or "",
+        }
 
     @staticmethod
     def _port_scan_event(event: NormalizedEvent) -> Dict[str, Any]:
@@ -183,6 +206,15 @@ class Orchestrator:
 
         for event in events:
             for detector in self.detector_registry.all():
+                if isinstance(detector, DDoSDetector):
+                    result = detector.predict(
+                        self.feature_preparer.ddos_event(event)
+                    )
+                    prediction = self._ddos_prediction(result)
+                    if prediction:
+                        alerts.append(self.alert_generator.generate(prediction, event))
+                    continue
+
                 # Add event to window
                 completed_windows = self.window_manager.add_event(event, detector.metadata.name)
 
@@ -197,6 +229,18 @@ class Orchestrator:
                         alerts.append(alert)
 
         return alerts
+
+    @staticmethod
+    def _ddos_prediction(result: Optional[Dict[str, Any]]) -> Optional[Prediction]:
+        if not result:
+            return None
+        return Prediction(
+            threat_class=result["label"],
+            confidence=float(result["confidence"]),
+            severity=result["severity"],
+            anomaly_zscore=0.0,
+            evidence=result["evidence"],
+        )
 
     def flush_windows(self) -> List[Alert]:
         """
