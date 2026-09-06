@@ -16,6 +16,7 @@ from ml_engine.ddos.ddo_detector import DDoSDetector
 from ml_engine.port_scanning.detector import PortScanDetector
 from ml_engine.DNS_Tunelling.dns_tunnelling_detector import DNSTunnellingDetector
 from backend.dns_tunnelling_pcap import DNSPacket, build_dns_features
+from backend.malware_tls_features import MalwareTLSFeatureAdapter
 
 C2BeaconingDetector = importlib.import_module(
     "ml_engine.C2 Beaconing.c2_beaconing_detector"
@@ -44,6 +45,9 @@ class DetectorRegistry:
             return
         if isinstance(detector, DNSTunnellingDetector):
             self._detectors["dns_tunnelling"] = detector
+            return
+        if isinstance(detector, MalwareTLSFeatureAdapter):
+            self._detectors["malware_tls"] = detector
             return
         self._detectors[detector.metadata.name] = detector
 
@@ -327,6 +331,16 @@ class Orchestrator:
                             alerts.append(self.alert_generator.generate(prediction, event))
                     continue
 
+                if isinstance(detector, MalwareTLSFeatureAdapter):
+                    completed_windows = self.window_manager.add_event(
+                        event, "malware_tls"
+                    )
+                    for window in completed_windows:
+                        prediction = self._tls_prediction(detector, window)
+                        if prediction:
+                            alerts.append(self.alert_generator.generate(prediction, event))
+                    continue
+
                 # Add event to window
                 completed_windows = self.window_manager.add_event(event, detector.metadata.name)
 
@@ -402,6 +416,31 @@ class Orchestrator:
             return "HIGH"
         return "CRITICAL"
 
+    @staticmethod
+    def _tls_prediction(
+        detector: MalwareTLSFeatureAdapter,
+        window: WindowState,
+    ) -> Optional[Prediction]:
+        features, verdict = detector.assess(window.events, window.events[-1])
+        if not verdict.malware_detected:
+            return None
+        evidence = {
+            "model_probability": verdict.probability,
+            "raw_probability": verdict.stability.raw_probability,
+            "probability_stddev": verdict.stability.probability_stddev,
+            "decision_stability": verdict.stability.decision_stability,
+            "review_reasons": list(verdict.review_reasons),
+            "quic": verdict.quic,
+            "model_feature_count": len(features),
+        }
+        return Prediction(
+            threat_class="MALWARE_TLS",
+            confidence=float(verdict.probability),
+            severity=Orchestrator._confidence_severity(float(verdict.probability)),
+            anomaly_zscore=0.0,
+            evidence=evidence,
+        )
+
     def flush_windows(self) -> List[Alert]:
         """
         Flush all active windows and return any remaining alerts.
@@ -419,6 +458,15 @@ class Orchestrator:
                     if prediction and window.events:
                         alerts.append(
                             self.alert_generator.generate(prediction, window.events[0])
+                        )
+                    continue
+                if isinstance(detector, MalwareTLSFeatureAdapter):
+                    if window.config.detector_name != "malware_tls":
+                        continue
+                    prediction = self._tls_prediction(detector, window)
+                    if prediction and window.events:
+                        alerts.append(
+                            self.alert_generator.generate(prediction, window.events[-1])
                         )
                     continue
                 if window.config.detector_name == detector.metadata.name:
