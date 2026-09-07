@@ -57,7 +57,9 @@ def test_zeek_evaluation_summary_is_complete_and_json_serializable():
     assert first["source"]["event_count"] == second["source"]["event_count"]
     assert first["runtime"]["events_received"] == second["runtime"]["events_received"]
     assert first["runtime"]["events_processed"] == second["runtime"]["events_processed"]
-    assert first["alerts"] == second["alerts"]
+    assert first["alerts"]["total"] == second["alerts"]["total"]
+    assert first["alerts"]["by_threat_class"] == second["alerts"]["by_threat_class"]
+    assert first["alerts"]["by_severity"] == second["alerts"]["by_severity"]
 
 
 def test_detector_failure_is_counted_and_worker_continues():

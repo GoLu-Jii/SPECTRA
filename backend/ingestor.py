@@ -2,8 +2,17 @@
 
 import os
 import glob
+import logging
+import math
 from dataclasses import dataclass, field
 from typing import Dict, Any, List, Tuple, Optional
+
+
+logger = logging.getLogger(__name__)
+SUPPORTED_LOG_TYPES = {"conn", "dns", "ssl", "http"}
+REQUIRED_RAW_FIELDS = {
+    "ts", "uid", "id.orig_h", "id.orig_p", "id.resp_h", "id.resp_p",
+}
 
 
 @dataclass
@@ -189,12 +198,31 @@ _FIELD_MAP: Dict[str, Dict[str, Any]] = {
 class Normalizer:
     """Converts raw parsed events to NormalizedEvent. Pure function, no state."""
 
+    def __init__(self, metrics=None) -> None:
+        self.metrics = metrics
+
     def normalize_raw(self, raw_events: List[Dict], log_type: str) -> List[NormalizedEvent]:
         """Normalize a batch of raw events from a single log type."""
-        return [self.normalize_event(ev, log_type) for ev in raw_events]
+        normalized = []
+        for index, raw in enumerate(raw_events):
+            try:
+                normalized.append(self.normalize_event(raw, log_type))
+            except (TypeError, ValueError, OverflowError) as exc:
+                if self.metrics is not None:
+                    self.metrics.malformed_events += 1
+                logger.warning(
+                    "Quarantined malformed Zeek record",
+                    extra={"log_type": log_type, "record_index": index, "error": str(exc)},
+                )
+        return normalized
 
     def normalize_event(self, raw: Dict, log_type: str) -> NormalizedEvent:
         """Normalize a single raw Zeek event into NormalizedEvent."""
+        if log_type not in SUPPORTED_LOG_TYPES:
+            raise ValueError(f"Unsupported Zeek log type: {log_type}")
+        missing = REQUIRED_RAW_FIELDS.difference(raw)
+        if missing:
+            raise ValueError(f"Missing required Zeek fields: {sorted(missing)}")
         fields: Dict[str, Any] = {}
 
         for zeek_name, mapping in _FIELD_MAP.items():
@@ -208,12 +236,26 @@ class Normalizer:
                 else:
                     fields[mapping["dest"]] = None
 
+        if not isinstance(fields.get("ts"), (int, float)) or not math.isfinite(fields["ts"]):
+            raise ValueError("Timestamp must be finite")
+        for field_name in ("src_port", "dst_port"):
+            if not isinstance(fields.get(field_name), int):
+                raise ValueError(f"{field_name} must be an integer")
+        for field_name in ("duration", "orig_bytes", "resp_bytes", "orig_pkts", "resp_pkts"):
+            value = fields.get(field_name)
+            if value is not None and (
+                not isinstance(value, (int, float))
+                or not math.isfinite(value)
+            ):
+                raise ValueError(f"{field_name} must be numeric and finite")
         fields["log_type"] = log_type
         fields["raw"] = dict(raw)
 
         # ssl.log and http.log don't have proto field (always TCP)
         if "proto" not in fields:
             fields["proto"] = "tcp"
+        if not fields.get("proto"):
+            raise ValueError("Protocol is required")
 
         return NormalizedEvent(**fields)
 
@@ -224,9 +266,9 @@ class Ingestor:
     Combines LogReader + Normalizer. Stateless.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, metrics=None) -> None:
         self._reader = LogReader()
-        self._normalizer = Normalizer()
+        self._normalizer = Normalizer(metrics=metrics)
 
     def ingest_file(self, filepath: str) -> List[NormalizedEvent]:
         """Read one Zeek log file, return normalized events."""

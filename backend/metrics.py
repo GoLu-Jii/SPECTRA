@@ -19,6 +19,8 @@ class Metrics:
         self.alerts_generated: int = 0
         self.dropped_events: int = 0
         self.detector_failures: int = 0
+        self.malformed_events: int = 0
+        self.abandoned_events: int = 0
         self.queue_depth: int = 0
         self._inference_latencies: List[float] = []
         self._e2e_latencies: List[float] = []
@@ -55,6 +57,8 @@ class Metrics:
             "alerts_generated": self.alerts_generated,
             "dropped_events": self.dropped_events,
             "detector_failures": self.detector_failures,
+            "malformed_events": self.malformed_events,
+            "abandoned_events": self.abandoned_events,
             "queue_depth": self.queue_depth,
             "throughput_events_per_sec": round(self.events_processed / elapsed, 4),
             "uptime_seconds": round(elapsed, 3),

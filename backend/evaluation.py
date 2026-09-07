@@ -37,20 +37,19 @@ class ReplayEvaluator:
         self.pipeline_factory = pipeline_factory or _default_pipeline_factory
 
     def run(self) -> Dict[str, Any]:
-        events = Ingestor().ingest_directory(str(self.zeek_dir))
         run_id = uuid.uuid4().hex
 
         started_at = time.perf_counter()
-        summary = asyncio.run(self._run_pipeline(events, run_id, started_at))
+        summary = asyncio.run(self._run_pipeline(run_id, started_at))
         return summary
 
     async def _run_pipeline(
         self,
-        events,
         run_id: str,
         started_at: float,
     ) -> Dict[str, Any]:
-        orchestrator, store, metrics, runner = self.pipeline_factory()
+        _, store, metrics, runner = self.pipeline_factory()
+        events = Ingestor(metrics=metrics).ingest_directory(str(self.zeek_dir))
         await runner.start()
         try:
             await runner.replay_events(events)
