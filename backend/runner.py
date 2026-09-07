@@ -122,6 +122,7 @@ class Runner:
                 try:
                     alerts = self.orchestrator.process_events([event])
                 except Exception:
+                    self.metrics.detector_failures += 1
                     logger.exception(
                         "Event processing failed; continuing stream",
                         extra={"event_uid": event.uid, "log_type": event.log_type},
