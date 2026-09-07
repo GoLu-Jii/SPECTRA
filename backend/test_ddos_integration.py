@@ -1,10 +1,12 @@
 from datetime import datetime
 from unittest.mock import Mock
 
+import pandas as pd
+
 from backend.ingestor import NormalizedEvent
 from backend.orchestrator import FeaturePreparer, Orchestrator
 from backend.windowing import WindowConfig
-from ml_engine.ddos.ddo_detector import DDoSDetector
+from ml_engine.ddos.ddo_detector import DDoSDetector, DDoSFeatureWindow
 
 
 def make_event() -> NormalizedEvent:
@@ -52,6 +54,18 @@ def test_real_ddos_model_and_scaler_reach_prediction():
     assert type(detector.model).__name__ == "XGBClassifier"
     assert type(detector.scaler).__name__ == "RobustScaler"
     assert result is None or result["detector"] == "DDoSDetector"
+
+
+def test_cleanup_preserves_rolling_bucket_defaultdicts():
+    window = DDoSFeatureWindow()
+    destination = "198.51.100.20"
+    current_time = pd.Timestamp("2026-09-06T12:10:00")
+
+    window.cleanup(destination, current_time)
+
+    window.events_5s[destination][pd.Timestamp("2026-09-06T12:10:00")].append(1)
+    window.events_30s[destination][pd.Timestamp("2026-09-06T12:10:00")].append(1)
+    window.events_60s[destination][pd.Timestamp("2026-09-06T12:10:00")].append(1)
 
 
 def test_orchestrator_invokes_real_ddos_detector():

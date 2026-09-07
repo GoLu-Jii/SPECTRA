@@ -1,8 +1,10 @@
+import asyncio
 from unittest.mock import Mock
 
 from backend.dns_tunnelling_pcap import DNSPacket
 from backend.ingestor import NormalizedEvent
 from backend.orchestrator import FeaturePreparer, Orchestrator
+from backend.runner import Runner
 from backend.windowing import WindowConfig
 from ml_engine.DNS_Tunelling.dns_tunnelling_detector import (
     DNSTunnellingDetector,
@@ -39,6 +41,21 @@ def make_packet(timestamp: float, request: bool) -> DNSPacket:
         transaction_id=7,
         is_request=request,
         payload_length=58 if request else 98,
+    )
+
+
+def make_zeek_only_dns_event(timestamp: float) -> NormalizedEvent:
+    return NormalizedEvent(
+        ts=timestamp,
+        uid=f"DNS-ZEEK-{int(timestamp)}",
+        src_ip="192.0.2.10",
+        src_port=53000,
+        dst_ip="198.51.100.53",
+        dst_port=53,
+        proto="udp",
+        log_type="dns",
+        query="example.com",
+        raw={"query": "example.com"},
     )
 
 
@@ -92,6 +109,33 @@ def test_orchestrator_invokes_real_dns_detector_and_maps_positive_result():
     assert len(alerts) == 1
     assert alerts[0].threat_classification.threat_class == "DNS_TUNNELLING"
     assert alerts[0].scoring.severity.value == "CRITICAL"
+
+
+def test_runner_skips_zeek_only_dns_and_continues_with_packet_events():
+    async def run_replay():
+        detector = DNSTunnellingDetector()
+        detector.predict = Mock(return_value=(0, 0.05, {}))
+        orchestrator = Orchestrator()
+        orchestrator.register_detector(
+            detector,
+            WindowConfig("dns_tunnelling", "tumbling", 1, ["src_ip", "dst_ip", "proto", "src_port", "dst_port"]),
+        )
+        runner = Runner(orchestrator)
+        await runner.start()
+
+        try:
+            await runner.feed(make_zeek_only_dns_event(0.0))
+            await runner.feed(make_event(0.0, make_packet(0.0, True)))
+            await runner.feed(make_event(1.0, make_packet(1.0, False)))
+            await runner._queue.join()
+
+            assert runner.metrics.events_processed == 3
+            assert not runner._task.done()
+            detector.predict.assert_called_once()
+        finally:
+            await runner.stop()
+
+    asyncio.run(run_replay())
 
 
 def test_dns_flush_invokes_detector_and_maps_positive_result():

@@ -179,7 +179,7 @@ class DDoSFeatureWindow:
         )
 
 
-        self.events_5s[destination] = {
+        self.events_5s[destination] = defaultdict(list, {
 
             bucket: events
 
@@ -188,10 +188,10 @@ class DDoSFeatureWindow:
 
             if bucket >= cutoff_5s
 
-        }
+        })
 
 
-        self.events_30s[destination] = {
+        self.events_30s[destination] = defaultdict(list, {
 
             bucket: events
 
@@ -200,10 +200,10 @@ class DDoSFeatureWindow:
 
             if bucket >= cutoff_30s
 
-        }
+        })
 
 
-        self.events_60s[destination] = {
+        self.events_60s[destination] = defaultdict(list, {
 
             bucket: events
 
@@ -212,7 +212,7 @@ class DDoSFeatureWindow:
 
             if bucket >= cutoff_60s
 
-        }
+        })
 
 
     # ========================================================

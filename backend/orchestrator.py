@@ -325,6 +325,8 @@ class Orchestrator:
                 if isinstance(detector, DNSTunnellingDetector):
                     if event.log_type != "dns":
                         continue
+                    if "dns_packet" not in event.raw:
+                        continue
                     window_event = self.feature_preparer.dns_window_event(event)
                     completed_windows = self.window_manager.add_event(
                         window_event, "dns_tunnelling"
