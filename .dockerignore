@@ -1,0 +1,9 @@
+.git
+.venv
+.pytest_cache
+frontend
+**/__pycache__
+**/*.pyc
+**/*.ipynb
+backend/test_*.py
+data_and_demo/demo_traffic.pcap
