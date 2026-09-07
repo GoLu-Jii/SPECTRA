@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from unittest.mock import Mock
 
@@ -14,10 +15,16 @@ from ml_engine.mock.detector import MockDetector
 
 
 class RaisingDetector(MockDetector):
-    """Test detector used to characterize worker failure behavior."""
+    """Test detector that fails once, then resumes normal processing."""
+
+    def __init__(self):
+        self._failed = False
 
     def predict(self, features, context):
-        raise RuntimeError("detector failure")
+        if not self._failed:
+            self._failed = True
+            raise RuntimeError("detector failure")
+        return super().predict(features, context)
 
 
 def make_event(timestamp: float, uid: str) -> NormalizedEvent:
@@ -138,21 +145,24 @@ def test_runner_shutdown_terminates_worker_cleanly():
     asyncio.run(run_stream())
 
 
-def test_detector_failure_isolation_is_not_supported():
+def test_detector_failure_does_not_kill_worker(caplog):
     async def run_stream():
         runner, _, metrics, _ = build_runner(window_size=1, detector=RaisingDetector())
 
         await runner.start()
         await runner.feed(make_event(1.0, "FAILURE-1"))
         await runner.feed(make_event(2.0, "FAILURE-2"))
-        await wait_for(lambda: runner._task.done())
+        await runner.feed(make_event(3.0, "AFTER-FAILURE"))
+        await wait_for(lambda: metrics.events_processed == 3)
 
-        assert isinstance(runner._task.exception(), RuntimeError)
-        assert metrics.events_received == 2
-        assert metrics.events_processed == 1
-        # The current Runner has no per-detector exception boundary. This test
-        # documents the hardening gap without changing production behavior.
-        with pytest.raises(RuntimeError, match="detector failure"):
-            await runner.stop()
+        assert not runner._task.done()
+        assert metrics.events_received == metrics.events_processed == 3
+        assert len(runner.store.get_all()) == 1
+        assert any(
+            record.levelno == logging.ERROR
+            and "Event processing failed; continuing stream" in record.message
+            for record in caplog.records
+        )
+        await runner.stop()
 
     asyncio.run(run_stream())

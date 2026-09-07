@@ -10,6 +10,7 @@ supports live ``feed()`` ingestion and ``replay_directory()`` for demo data.
 """
 
 import asyncio
+import logging
 import time
 from typing import List, Optional
 
@@ -17,6 +18,9 @@ from backend.ingestor import NormalizedEvent, Ingestor
 from backend.orchestrator import Orchestrator
 from backend.metrics import Metrics
 from backend.store import AlertStore
+
+
+logger = logging.getLogger(__name__)
 
 
 class Runner:
@@ -115,8 +119,16 @@ class Runner:
                 received_at = time.monotonic()
 
                 t0 = time.monotonic()
-                alerts = self.orchestrator.process_events([event])
-                self.metrics.record_inference_latency(time.monotonic() - t0)
+                try:
+                    alerts = self.orchestrator.process_events([event])
+                except Exception:
+                    logger.exception(
+                        "Event processing failed; continuing stream",
+                        extra={"event_uid": event.uid, "log_type": event.log_type},
+                    )
+                    alerts = []
+                finally:
+                    self.metrics.record_inference_latency(time.monotonic() - t0)
 
                 self.metrics.events_processed += 1
                 await self._emit_alerts(alerts, received_at=received_at)
