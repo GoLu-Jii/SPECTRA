@@ -9,6 +9,7 @@ Endpoints:
 """
 
 import asyncio
+import importlib
 import os
 from contextlib import asynccontextmanager
 
@@ -19,7 +20,18 @@ from backend.windowing import WindowConfig
 from backend.store import AlertStore
 from backend.metrics import Metrics
 from backend.runner import Runner
+from backend.malware_tls_features import MalwareTLSFeatureAdapter
+from ml_engine.ddos.ddo_detector import DDoSDetector
+from ml_engine.DNS_Tunelling.dns_tunnelling_detector import DNSTunnellingDetector
 from ml_engine.mock.detector import MockDetector
+from ml_engine.port_scanning.detector import PortScanDetector
+
+C2BeaconingDetector = importlib.import_module(
+    "ml_engine.C2 Beaconing.c2_beaconing_detector"
+).C2BeaconingDetector
+DGA_Detector = importlib.import_module(
+    "ml_engine.DGA.dga_detector"
+).DGADetector
 
 ALERT_BUFFER_SIZE = int(os.getenv("ALERT_BUFFER_SIZE", "10000"))
 ZEEK_LOG_DIR = os.getenv("ZEEK_LOG_DIR", "data_and_demo/zeek_logs")
@@ -27,10 +39,47 @@ REPLAY_ON_START = os.getenv("REPLAY_ON_START", "").lower() in ("1", "true", "yes
 
 
 def build_pipeline():
-    """Construct the P3 pipeline: orchestrator + mock detector + runner."""
+    """Construct the P3 pipeline with all production detectors."""
     store = AlertStore(max_size=ALERT_BUFFER_SIZE)
     metrics = Metrics()
     orch = Orchestrator()
+
+    orch.register_detector(
+        DDoSDetector(),
+        WindowConfig("ddos", "tumbling", 60, ["dst_ip"]),
+    )
+    orch.register_detector(
+        C2BeaconingDetector(),
+        WindowConfig("c2", "tumbling", 60, ["src_ip", "dst_ip"]),
+    )
+    orch.register_detector(
+        DGA_Detector(),
+        WindowConfig("dga", "tumbling", 1, []),
+    )
+    orch.register_detector(
+        DNSTunnellingDetector(),
+        WindowConfig(
+            "dns_tunnelling",
+            "tumbling",
+            60,
+            ["src_ip", "dst_ip", "proto", "src_port", "dst_port"],
+        ),
+    )
+    orch.register_detector(
+        MalwareTLSFeatureAdapter(),
+        WindowConfig(
+            "malware_tls",
+            "tumbling",
+            60,
+            ["src_ip", "dst_ip", "proto", "src_port", "dst_port"],
+        ),
+    )
+    orch.register_detector(
+        PortScanDetector(),
+        WindowConfig("recon", "tumbling", 1, ["src_ip"]),
+    )
+
+    # Keep the Phase 4 mock path available for compatibility tests.
     orch.register_detector(
         MockDetector(),
         WindowConfig(
@@ -69,7 +118,7 @@ async def health():
     return {
         "status": "ok",
         "uptime_seconds": snap["uptime_seconds"],
-        "detectors": [d.metadata.name for d in app.state.orch.detector_registry.all()],
+        "detectors": app.state.orch.detector_registry.names(),
     }
 
 

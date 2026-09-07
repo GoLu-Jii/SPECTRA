@@ -59,6 +59,10 @@ class DetectorRegistry:
         """Get all registered detectors."""
         return list(self._detectors.values())
 
+    def names(self) -> List[str]:
+        """Get registered detector names."""
+        return list(self._detectors)
+
     def discover_from_directory(self, directory: str) -> None:
         """
         Auto-discover detectors from ml_engine/*/detector.py.
@@ -451,6 +455,32 @@ class Orchestrator:
         completed_windows = self.window_manager.flush_all()
         for window in completed_windows:
             for detector in self.detector_registry.all():
+                if isinstance(detector, DDoSDetector) or isinstance(detector, DGA_Detector):
+                    continue
+                if isinstance(detector, C2BeaconingDetector):
+                    if window.config.detector_name != "c2" or len(window.events) < 2:
+                        continue
+                    flows = sorted(
+                        (self.feature_preparer.c2_event(item) for item in window.events),
+                        key=lambda flow: float(flow["start_time_unix"]),
+                    )
+                    alert, confidence, evidence = detector.predict(flows)
+                    if alert and window.events:
+                        prediction = Prediction(
+                            threat_class="BOTNET_C2_BEACONING",
+                            confidence=float(confidence),
+                            severity=self._c2_severity(float(confidence)),
+                            anomaly_zscore=0.0,
+                            evidence={
+                                **evidence,
+                                "src_ip": window.events[0].src_ip,
+                                "dst_ip": window.events[0].dst_ip,
+                            },
+                        )
+                        alerts.append(
+                            self.alert_generator.generate(prediction, window.events[-1])
+                        )
+                    continue
                 if isinstance(detector, DNSTunnellingDetector):
                     if window.config.detector_name != "dns_tunnelling":
                         continue
