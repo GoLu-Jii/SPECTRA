@@ -100,6 +100,24 @@ def test_incremental_slow_producer_drains_and_records_latency():
     asyncio.run(run_stream())
 
 
+def test_replay_waits_for_queue_capacity_without_drops():
+    async def run_replay():
+        runner, _, metrics, _ = build_runner(window_size=1)
+        runner._max_queue = 1
+        events = [make_event(float(index), f"REPLAY-{index}") for index in range(8)]
+
+        await runner.start()
+        try:
+            await runner.replay_events(events)
+            assert metrics.events_received == len(events)
+            assert metrics.events_processed == len(events)
+            assert metrics.dropped_events == 0
+        finally:
+            await runner.stop()
+
+    asyncio.run(run_replay())
+
+
 def test_window_boundary_generates_alert_before_stream_ends():
     async def run_stream():
         runner, store, metrics, detector = build_runner(window_size=1)

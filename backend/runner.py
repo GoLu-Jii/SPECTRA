@@ -99,10 +99,18 @@ class Runner:
     # ------------------------------------------------------------------
     # Ingestion
     # ------------------------------------------------------------------
-    async def feed(self, event: NormalizedEvent) -> None:
-        """Enqueue a single event for live processing (non-blocking)."""
+    async def feed(
+        self,
+        event: NormalizedEvent,
+        *,
+        wait_for_capacity: bool = False,
+    ) -> None:
+        """Enqueue one event, optionally waiting for replay capacity."""
         self.metrics.events_received += 1
         if not self._accepting or self._queue is None or self._queue.full():
+            if wait_for_capacity and self._accepting and self._queue is not None:
+                await self._queue.put(event)
+                return
             self.metrics.dropped_events += 1
             return
         self._queue.put_nowait(event)
@@ -111,7 +119,7 @@ class Runner:
         """Replay a list of events; return the number of alerts generated."""
         before = self.metrics.alerts_generated
         for ev in events:
-            await self.feed(ev)
+            await self.feed(ev, wait_for_capacity=True)
 
         # Wait for the worker to drain the queue, then flush any windows
         # that never received a triggering "next" event.
