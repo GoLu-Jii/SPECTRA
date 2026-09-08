@@ -1,1 +1,42 @@
-# SPECTRA service orchestration placeholder.
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      ZEEK_LOG_DIR: /data/zeek_logs
+      EVENT_QUEUE_MAX_SIZE: "1000"
+      RUNNER_SHUTDOWN_TIMEOUT_SECONDS: "5"
+      SUBSCRIBER_QUEUE_MAX_SIZE: "100"
+      ENABLE_MOCK_DETECTOR: "false"
+      REPLAY_ON_START: "true"
+    volumes:
+      - ./data_and_demo/zeek_logs:/data/zeek_logs:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    networks:
+      - spectra_passive
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import json, urllib.request;
+          body = json.load(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3));
+          raise SystemExit(0 if body.get('ready') is True else 1)
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+networks:
+  spectra_passive:
+    internal: true

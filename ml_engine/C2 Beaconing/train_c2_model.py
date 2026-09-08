@@ -2,54 +2,51 @@ import os
 import joblib
 import numpy as np
 import pandas as pd
-from scipy.stats import entropy
-from collections import Counter
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
 
 FEATURE_COLUMNS = [
-    "iat_mean",
-    "iat_std",
-    "iat_cv",
-    "flow_count",
-    "bytes_mean",
-    "bytes_std",
-    "pkts_mean",
-    "dest_port_entropy"
+    "Dur", "Pkts", "Bytes", "IAT", "IAT_Variance", "IAT_Std",
+    "Bytes_Variance", "Bytes_Per_Packet", "Proto_esp", "Proto_icmp",
+    "Proto_igmp", "Proto_ipv6", "Proto_ipv6-icmp", "Proto_ipx/spx",
+    "Proto_pim", "Proto_rarp", "Proto_rtcp", "Proto_rtp", "Proto_tcp",
+    "Proto_udp", "Proto_udt", "Proto_unas", "FlowDir_Reverse",
 ]
+PROTOCOL_FEATURES = FEATURE_COLUMNS[8:22]
+ALERT_THRESHOLD = 0.20
 
 def extract_window_features(df_window):
-    """Computes the 8 target behavioral features from a conversational flow window."""
-    if len(df_window) < 4:
+    """Compute the exact 23 features expected by botnet_c2_detector.pkl."""
+    if len(df_window) < 2:
         return None
 
-    # Chronological sort
     df_sorted = df_window.sort_values(by="timestamp_unix")
     timestamps = df_sorted["timestamp_unix"].to_numpy(dtype=np.float64)
-    bytes_arr = df_sorted["TotBytes"].to_numpy(dtype=np.float64)
-    pkts_arr = df_sorted["TotPkts"].to_numpy(dtype=np.float64)
-    ports = df_sorted["Dport"].tolist()
-
-    # Inter-Arrival Time (IAT)
+    bytes_arr = df_sorted["bytes"].to_numpy(dtype=np.float64)
+    pkts_arr = df_sorted["pkts"].to_numpy(dtype=np.float64)
     iats = np.diff(timestamps)
-    iat_mean = float(np.mean(iats))
-    iat_std = float(np.std(iats))
-    iat_cv = float(iat_std / (iat_mean + 1e-6))
-
-    # Destination Port Entropy
-    port_counts = list(Counter(ports).values())
-    port_ent = float(entropy(port_counts)) if len(port_counts) > 0 else 0.0
-
-    return {
-        "iat_mean": iat_mean,
-        "iat_std": iat_std,
-        "iat_cv": iat_cv,
-        "flow_count": len(df_sorted),
-        "bytes_mean": float(np.mean(bytes_arr)),
-        "bytes_std": float(np.std(bytes_arr)),
-        "pkts_mean": float(np.mean(pkts_arr)),
-        "dest_port_entropy": port_ent
+    total_packets = float(np.sum(pkts_arr))
+    protocols = set(df_sorted["protocol"].astype(str).str.lower())
+    features = {
+        "Dur": float(timestamps[-1] - timestamps[0]),
+        "Pkts": total_packets,
+        "Bytes": float(np.sum(bytes_arr)),
+        "IAT": float(np.mean(iats)),
+        "IAT_Variance": float(np.var(iats)),
+        "IAT_Std": float(np.std(iats)),
+        "Bytes_Variance": float(np.var(bytes_arr)),
+        "Bytes_Per_Packet": float(np.sum(bytes_arr) / total_packets) if total_packets else 0.0,
+        "FlowDir_Reverse": float(df_sorted["flow_dir_reverse"].astype(bool).any()),
     }
+    for feature in PROTOCOL_FEATURES:
+        features[feature] = float(feature.removeprefix("Proto_").lower() in protocols)
+    return {name: features[name] for name in FEATURE_COLUMNS}
+
+def _first_column(df, names, default):
+    for name in names:
+        if name in df.columns:
+            return df[name]
+    return pd.Series(default, index=df.index)
 
 def prepare_dataset(file_path, window_duration_seconds=300):
     """Parses CTU-13 NetFlow logs and aggregates them into rolling conversational windows."""
@@ -68,10 +65,11 @@ def prepare_dataset(file_path, window_duration_seconds=300):
         # Fallback for synthetic/relative sequence index
         df["timestamp_unix"] = np.arange(len(df), dtype=np.float64)
 
-    # Cast numeric attributes
-    df["TotBytes"] = pd.to_numeric(df.get("TotBytes", df.get("bytes", 0)), errors="coerce").fillna(0)
-    df["TotPkts"] = pd.to_numeric(df.get("TotPkts", df.get("pkts", 1)), errors="coerce").fillna(1)
-    df["Dport"] = df.get("Dport", df.get("dst_port", 0)).fillna(0)
+    df["bytes"] = pd.to_numeric(_first_column(df, ["Bytes", "TotBytes", "bytes"], 0), errors="coerce").fillna(0)
+    df["pkts"] = pd.to_numeric(_first_column(df, ["Pkts", "TotPkts", "pkts"], 0), errors="coerce").fillna(0)
+    df["protocol"] = _first_column(df, ["Proto", "Protocol", "proto", "protocol"], "").fillna("")
+    reverse = _first_column(df, ["FlowDir_Reverse", "flow_dir_reverse"], 0)
+    df["flow_dir_reverse"] = pd.to_numeric(reverse, errors="coerce").fillna(0).astype(bool)
 
     # Ground truth mapping: 1 for Botnet, 0 for Normal/Background
     df["target"] = df["Label"].astype(str).apply(lambda x: 1 if "botnet" in x.lower() else 0)
@@ -81,7 +79,7 @@ def prepare_dataset(file_path, window_duration_seconds=300):
 
     # Group by conversation key (SrcAddr, DstAddr)
     for (src, dst), group in df.groupby(["SrcAddr", "DstAddr"]):
-        if len(group) < 4:
+        if len(group) < 2:
             continue
 
         group = group.sort_values(by="timestamp_unix")
@@ -131,10 +129,11 @@ def main():
 
     # Step 3: Out-of-Distribution Validation
     print("\n--- Phase 3: Out-of-Distribution Validation (Capture 50) ---")
-    y_pred = rf_model.predict(X_val)
     y_prob = rf_model.predict_proba(X_val)[:, 1]
+    y_pred = (y_prob >= ALERT_THRESHOLD).astype(np.uint8)
 
     print("\nConfusion Matrix:")
+    print(f"Threshold: {ALERT_THRESHOLD:.2f}")
     print(confusion_matrix(y_val, y_pred))
 
     print("\nClassification Report:")
@@ -150,8 +149,7 @@ def main():
         print(f"  - {col:<20}: {imp:.4f}")
 
     # Step 4: Export Artifact
-    os.makedirs("models", exist_ok=True)
-    artifact_path = "models/c2_beaconing_rf.pkl"
+    artifact_path = "botnet_c2_detector.pkl"
     joblib.dump(rf_model, artifact_path)
     print(f"\n[+] Successfully serialized Random Forest model to: {artifact_path}")
 

@@ -44,8 +44,9 @@ THRESHOLD = 0.50
 
 
 class DNSTunnellingDetector:
-    def __init__(self, model_path: str | Path = "dns_tunnelling_xgb_model.pkl", threshold: float = THRESHOLD) -> None:
-        self.model = joblib.load(model_path)
+    def __init__(self, model_path: str | Path | None = None, threshold: float = THRESHOLD) -> None:
+        artifact_path = Path(model_path) if model_path else Path(__file__).with_name("dns_tunnelling_xgb_model.pkl")
+        self.model = joblib.load(artifact_path)
         self.threshold = threshold
 
     def transform(self, flow_features: Mapping[str, object]) -> pd.DataFrame:
@@ -53,7 +54,7 @@ class DNSTunnellingDetector:
         if missing:
             raise ValueError(f"Missing DNS tunnelling features: {', '.join(missing)}")
         frame = pd.DataFrame([[flow_features[name] for name in FEATURE_ORDER]], columns=FEATURE_ORDER)
-        return frame.fillna(0)
+        return frame.apply(pd.to_numeric, errors="raise").fillna(0)
 
     def predict(self, flow_features: Mapping[str, object]) -> tuple[int, float, dict[str, object]]:
         features = self.transform(flow_features)

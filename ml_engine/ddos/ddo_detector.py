@@ -1,28 +1,22 @@
-"""
-DDoS Threat Detector implementation adhering to BaseThreatDetector interface.
-Derived from XGBoost model and feature pipeline in train_ddos.ipynb.
-"""
-
-from __future__ import annotations
-
+import os
 import math
-from collections import defaultdict, deque
-from datetime import timedelta
+import pickle
+import joblib
+
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, Any, Optional, List
 
 import numpy as np
 import pandas as pd
-import joblib
 
-from ml_engine.interface import (
-    BaseThreatDetector,
-    DetectorMetadata,
-    ThreatClass,
-    Prediction,
-)
 
-# 26 features expected by the trained XGBoost model
+# ============================================================
+# MODEL CONFIGURATION
+# ============================================================
+
+PRODUCTION_THRESHOLD = 0.1
+
+
 FEATURE_NAMES = [
     "packets_per_second",
     "bytes_per_second",
@@ -52,6 +46,7 @@ FEATURE_NAMES = [
     "direction_R2R",
 ]
 
+
 CONTINUOUS_COLS = [
     "packets_per_second",
     "bytes_per_second",
@@ -70,243 +65,1187 @@ CONTINUOUS_COLS = [
     "byte_rate_mean_60s",
 ]
 
-DEFAULT_MODEL_FILENAME = "xgboost_ddos_model.pkl"
-DEFAULT_SCALER_FILENAME = "robust_scaler.pkl"
-PRODUCTION_THRESHOLD = 0.1
 
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
 
-def _entropy(values: List[Any]) -> float:
-    """Calculate Shannon entropy for discrete values."""
+def calculate_entropy(values):
+    """
+    Calculate Shannon entropy.
+
+    Used for:
+        source_ip_entropy_5s
+    """
+
     if not values:
         return 0.0
-    counts: Dict[Any, int] = {}
+
+    counts = {}
+
     for value in values:
         counts[value] = counts.get(value, 0) + 1
-    total = len(values)
-    return -sum(
-        (count / total) * math.log2(count / total)
-        for count in counts.values()
-    )
 
+    total = len(values)
+
+    entropy = 0.0
+
+    for count in counts.values():
+
+        probability = count / total
+
+        entropy -= probability * math.log2(probability)
+
+    return entropy
+
+
+def get_severity(probability):
+    """
+    Application-level severity mapping.
+    """
+
+    if probability >= 0.90:
+        return "CRITICAL"
+
+    if probability >= 0.70:
+        return "HIGH"
+
+    if probability >= 0.40:
+        return "MEDIUM"
+
+    return "LOW"
+
+
+# ============================================================
+# DDoS FEATURE WINDOW
+# ============================================================
 
 class DDoSFeatureWindow:
+
     """
-    Stateful feature aggregator that builds 5s, 30s, and 60s behavioral metrics
-    from streaming raw flow events per destination server.
+    Stateful feature aggregation.
+
+    Aggregation is grouped by:
+
+        destination + fixed 5-second bucket
+        destination + fixed 30-second bucket
+        destination + fixed 60-second bucket
+
+    Events should preferably arrive in chronological order.
     """
 
-    def __init__(self) -> None:
-        self.events: Dict[str, deque] = defaultdict(deque)
+    def __init__(self):
 
-    def build_features(self, event: dict) -> dict:
-        event = dict(event)
+        # destination -> bucket -> events
 
-        start = pd.to_datetime(event["startDateTime"])
-        stop = pd.to_datetime(event["stopDateTime"])
+        self.events_5s = defaultdict(
+            lambda: defaultdict(list)
+        )
 
-        src = event.get("source") or event.get("src_ip") or "0.0.0.0"
-        dst = event.get("destination") or event.get("dst_ip") or "0.0.0.0"
-        protocol = str(event.get("protocolName") or event.get("protocol") or "tcp_ip")
-        direction = str(event.get("direction") or "L2R")
+        self.events_30s = defaultdict(
+            lambda: defaultdict(list)
+        )
 
-        src_bytes = float(event.get("totalSourceBytes", event.get("orig_bytes", 0)))
-        dst_bytes = float(event.get("totalDestinationBytes", event.get("resp_bytes", 0)))
-        src_packets = float(event.get("totalSourcePackets", event.get("orig_pkts", 0)))
-        dst_packets = float(event.get("totalDestinationPackets", event.get("resp_pkts", 0)))
+        self.events_60s = defaultdict(
+            lambda: defaultdict(list)
+        )
 
-        duration = max((stop - start).total_seconds(), 0.001)
-        total_bytes = src_bytes + dst_bytes
-        total_packets = src_packets + dst_packets
 
-        flags = str(event.get("sourceTCPFlagsDescription") or event.get("history") or "")
-        syn_ratio = int("S" in flags or "s" in flags)
-        rst_ratio = int("R" in flags or "r" in flags)
+    # ========================================================
+    # CLEANUP
+    # ========================================================
 
-        base = {
+    def cleanup(self, destination, current_time):
+
+        """
+        Remove old buckets.
+
+        This prevents unlimited memory growth.
+        """
+
+        cutoff_5s = (
+            current_time.floor("5s")
+            - pd.Timedelta(minutes=2)
+        )
+
+        cutoff_30s = (
+            current_time.floor("30s")
+            - pd.Timedelta(minutes=5)
+        )
+
+        cutoff_60s = (
+            current_time.floor("60s")
+            - pd.Timedelta(minutes=10)
+        )
+
+
+        self.events_5s[destination] = defaultdict(list, {
+
+            bucket: events
+
+            for bucket, events
+            in self.events_5s[destination].items()
+
+            if bucket >= cutoff_5s
+
+        })
+
+
+        self.events_30s[destination] = defaultdict(list, {
+
+            bucket: events
+
+            for bucket, events
+            in self.events_30s[destination].items()
+
+            if bucket >= cutoff_30s
+
+        })
+
+
+        self.events_60s[destination] = defaultdict(list, {
+
+            bucket: events
+
+            for bucket, events
+            in self.events_60s[destination].items()
+
+            if bucket >= cutoff_60s
+
+        })
+
+
+    # ========================================================
+    # BUILD FEATURES
+    # ========================================================
+
+    def build_features(self, event):
+
+        """
+        Convert a raw network flow event into the
+        exact 26 features expected by the model.
+        """
+
+
+        # ====================================================
+        # TIMESTAMP
+        # ====================================================
+
+        start = pd.to_datetime(
+            event["startDateTime"]
+        )
+
+        stop = pd.to_datetime(
+            event["stopDateTime"]
+        )
+
+
+        # ====================================================
+        # NETWORK IDENTIFIERS
+        # ====================================================
+
+        source = (
+            event.get("source")
+            or event.get("src_ip")
+            or "unknown"
+        )
+
+
+        destination = (
+            event.get("destination")
+            or event.get("dst_ip")
+            or "unknown"
+        )
+
+
+        protocol = str(
+
+            event.get("protocolName")
+
+            or event.get("protocol")
+
+            or ""
+
+        ).lower()
+
+
+        direction = str(
+
+            event.get("direction")
+
+            or ""
+
+        )
+
+
+        # ====================================================
+        # FLOW VALUES
+        # ====================================================
+
+        source_bytes = float(
+
+            event.get(
+
+                "totalSourceBytes",
+
+                event.get("orig_bytes", 0)
+
+            )
+
+            or 0
+
+        )
+
+
+        destination_bytes = float(
+
+            event.get(
+
+                "totalDestinationBytes",
+
+                event.get("resp_bytes", 0)
+
+            )
+
+            or 0
+
+        )
+
+
+        source_packets = float(
+
+            event.get(
+
+                "totalSourcePackets",
+
+                event.get("orig_pkts", 0)
+
+            )
+
+            or 0
+
+        )
+
+
+        destination_packets = float(
+
+            event.get(
+
+                "totalDestinationPackets",
+
+                event.get("resp_pkts", 0)
+
+            )
+
+            or 0
+
+        )
+
+
+        # ====================================================
+        # DURATION
+        # ====================================================
+
+        duration = max(
+
+            (stop - start).total_seconds(),
+
+            0.001
+
+        )
+
+
+        total_bytes = (
+
+            source_bytes
+
+            + destination_bytes
+
+        )
+
+
+        total_packets = (
+
+            source_packets
+
+            + destination_packets
+
+        )
+
+
+        # ====================================================
+        # TCP FLAGS
+        # ====================================================
+
+        tcp_flags = str(
+
+            event.get(
+
+                "sourceTCPFlagsDescription",
+
+                ""
+
+            )
+
+            or ""
+
+        )
+
+
+        syn_ratio = int(
+
+            "S" in tcp_flags
+
+            or "s" in tcp_flags
+
+        )
+
+
+        rst_ratio = int(
+
+            "R" in tcp_flags
+
+            or "r" in tcp_flags
+
+        )
+
+
+        syn_without_data = int(
+
+            syn_ratio == 1
+
+            and source_bytes < 100
+
+        )
+
+
+        # ====================================================
+        # PER-FLOW FEATURES
+        # ====================================================
+
+        packets_per_second = (
+
+            total_packets
+
+            / duration
+
+        )
+
+
+        bytes_per_second = (
+
+            total_bytes
+
+            / duration
+
+        )
+
+
+        byte_asymmetry = (
+
+            abs(
+
+                source_bytes
+
+                - destination_bytes
+
+            )
+
+            / (total_bytes + 1)
+
+        )
+
+
+        packet_asymmetry = (
+
+            abs(
+
+                source_packets
+
+                - destination_packets
+
+            )
+
+            / (total_packets + 1)
+
+        )
+
+
+        bidirectional_ratio = (
+
+            destination_bytes
+
+            / (total_bytes + 1)
+
+        )
+
+
+        # ====================================================
+        # INTERNAL EVENT REPRESENTATION
+        # ====================================================
+
+        internal_event = {
+
             "timestamp": start,
-            "source": src,
-            "destination": dst,
+
+            "source": source,
+
+            "destination": destination,
+
             "protocolName": protocol,
-            "direction": direction,
-            "bytes_per_second": total_bytes / duration,
-            "packets_per_second": total_packets / duration,
-            "byte_asymmetry": abs(src_bytes - dst_bytes) / (total_bytes + 1),
-            "packet_asymmetry": abs(src_packets - dst_packets) / (total_packets + 1),
-            "bidirectional_ratio": dst_bytes / (total_bytes + 1),
-            "syn_ratio": syn_ratio,
-            "rst_ratio": rst_ratio,
-            "syn_without_data": int(syn_ratio == 1 and src_bytes < 100),
+
+            "bytes_per_second": bytes_per_second,
+
         }
 
-        q = self.events[dst]
-        cutoff = start - timedelta(seconds=60)
-        while q and q[0]["timestamp"] < cutoff:
-            q.popleft()
 
-        q.append(base)
+        # ====================================================
+        # FIXED TIME BUCKETS
+        # ====================================================
 
-        events_5 = [e for e in q if e["timestamp"] >= start - timedelta(seconds=5)]
-        events_30 = [e for e in q if e["timestamp"] >= start - timedelta(seconds=30)]
-        events_60 = list(q)
+        bucket_5s = start.floor("5s")
+
+        bucket_30s = start.floor("30s")
+
+        bucket_60s = start.floor("60s")
+
+
+        # ====================================================
+        # STORE EVENT
+        # ====================================================
+
+        self.events_5s[destination][
+            bucket_5s
+        ].append(
+            internal_event
+        )
+
+
+        self.events_30s[destination][
+            bucket_30s
+        ].append(
+            internal_event
+        )
+
+
+        self.events_60s[destination][
+            bucket_60s
+        ].append(
+            internal_event
+        )
+
+
+        # ====================================================
+        # GET EVENTS IN CURRENT FIXED BUCKETS
+        # ====================================================
+
+        events_5 = (
+
+            self.events_5s[destination][
+                bucket_5s
+            ]
+
+        )
+
+
+        events_30 = (
+
+            self.events_30s[destination][
+                bucket_30s
+            ]
+
+        )
+
+
+        events_60 = (
+
+            self.events_60s[destination][
+                bucket_60s
+            ]
+
+        )
+
+
+        # ====================================================
+        # 5 SECOND FEATURES
+        # ====================================================
+
+        unique_source_ips_5s = len(
+
+            {
+
+                item["source"]
+
+                for item in events_5
+
+            }
+
+        )
+
+
+        source_ip_entropy_5s = calculate_entropy(
+
+            [
+
+                item["source"]
+
+                for item in events_5
+
+            ]
+
+        )
+
+
+        # ====================================================
+        # 30 SECOND FEATURES
+        # ====================================================
+
+        flows_30s = len(
+            events_30
+        )
+
+
+        unique_sources_30s = len(
+
+            {
+
+                item["source"]
+
+                for item in events_30
+
+            }
+
+        )
+
+
+        protocol_diversity_30s = len(
+
+            {
+
+                item["protocolName"]
+
+                for item in events_30
+
+            }
+
+        )
+
+
+        if events_30:
+
+            byte_rate_mean_30s = (
+
+                sum(
+
+                    item["bytes_per_second"]
+
+                    for item in events_30
+
+                )
+
+                / len(events_30)
+
+            )
+
+        else:
+
+            byte_rate_mean_30s = 0.0
+
+
+        # ====================================================
+        # 60 SECOND FEATURES
+        # ====================================================
+
+        flows_60s = len(
+            events_60
+        )
+
+
+        unique_sources_60s = len(
+
+            {
+
+                item["source"]
+
+                for item in events_60
+
+            }
+
+        )
+
+
+        protocol_diversity_60s = len(
+
+            {
+
+                item["protocolName"]
+
+                for item in events_60
+
+            }
+
+        )
+
+
+        if events_60:
+
+            byte_rate_mean_60s = (
+
+                sum(
+
+                    item["bytes_per_second"]
+
+                    for item in events_60
+
+                )
+
+                / len(events_60)
+
+            )
+
+        else:
+
+            byte_rate_mean_60s = 0.0
+
+
+        # ====================================================
+        # BUILD FINAL FEATURE DICTIONARY
+        # ====================================================
 
         features = {
-            "packets_per_second": base["packets_per_second"],
-            "bytes_per_second": base["bytes_per_second"],
-            "byte_asymmetry": base["byte_asymmetry"],
-            "packet_asymmetry": base["packet_asymmetry"],
-            "bidirectional_ratio": base["bidirectional_ratio"],
-            "syn_ratio": base["syn_ratio"],
-            "rst_ratio": base["rst_ratio"],
-            "syn_without_data": base["syn_without_data"],
 
-            "unique_source_ips_5s": len({e["source"] for e in events_5}),
-            "source_ip_entropy_5s": _entropy([e["source"] for e in events_5]),
 
-            "flows_30s": len(events_30),
-            "unique_sources_30s": len({e["source"] for e in events_30}),
-            "protocol_diversity_30s": len({e["protocolName"] for e in events_30}),
-            "byte_rate_mean_30s": (
-                sum(e["bytes_per_second"] for e in events_30) / len(events_30)
-                if events_30 else 0.0
-            ),
+            # ------------------------------------------------
+            # PER FLOW FEATURES
+            # ------------------------------------------------
 
-            "flows_60s": len(events_60),
-            "unique_sources_60s": len({e["source"] for e in events_60}),
-            "protocol_diversity_60s": len({e["protocolName"] for e in events_60}),
-            "byte_rate_mean_60s": (
-                sum(e["bytes_per_second"] for e in events_60) / len(events_60)
-                if events_60 else 0.0
-            ),
+            "packets_per_second":
+                packets_per_second,
+
+
+            "bytes_per_second":
+                bytes_per_second,
+
+
+            "byte_asymmetry":
+                byte_asymmetry,
+
+
+            "packet_asymmetry":
+                packet_asymmetry,
+
+
+            "bidirectional_ratio":
+                bidirectional_ratio,
+
+
+            "syn_ratio":
+                syn_ratio,
+
+
+            "rst_ratio":
+                rst_ratio,
+
+
+            "syn_without_data":
+                syn_without_data,
+
+
+            # ------------------------------------------------
+            # 5 SECOND FEATURES
+            # ------------------------------------------------
+
+            "unique_source_ips_5s":
+                unique_source_ips_5s,
+
+
+            "source_ip_entropy_5s":
+                source_ip_entropy_5s,
+
+
+            # ------------------------------------------------
+            # 30 SECOND FEATURES
+            # ------------------------------------------------
+
+            "flows_30s":
+                flows_30s,
+
+
+            "unique_sources_30s":
+                unique_sources_30s,
+
+
+            "protocol_diversity_30s":
+                protocol_diversity_30s,
+
+
+            "byte_rate_mean_30s":
+                byte_rate_mean_30s,
+
+
+            # ------------------------------------------------
+            # 60 SECOND FEATURES
+            # ------------------------------------------------
+
+            "flows_60s":
+                flows_60s,
+
+
+            "unique_sources_60s":
+                unique_sources_60s,
+
+
+            "protocol_diversity_60s":
+                protocol_diversity_60s,
+
+
+            "byte_rate_mean_60s":
+                byte_rate_mean_60s,
+
         }
 
-        for p in ["igmp", "ip", "ipv6icmp", "tcp_ip", "udp_ip"]:
-            features[f"protocolName_{p}"] = int(protocol == p)
 
-        for d in ["L2R", "R2L", "R2R"]:
-            features[f"direction_{d}"] = int(direction == d)
+        # ====================================================
+        # PROTOCOL FEATURES
+        # ====================================================
+
+        features["protocolName_igmp"] = int(
+            protocol == "igmp"
+        )
+
+
+        features["protocolName_ip"] = int(
+            protocol == "ip"
+        )
+
+
+        features["protocolName_ipv6icmp"] = int(
+            protocol == "ipv6icmp"
+        )
+
+
+        features["protocolName_tcp_ip"] = int(
+            protocol == "tcp_ip"
+        )
+
+
+        features["protocolName_udp_ip"] = int(
+            protocol == "udp_ip"
+        )
+
+
+        # ====================================================
+        # DIRECTION FEATURES
+        # ====================================================
+
+        features["direction_L2R"] = int(
+            direction == "L2R"
+        )
+
+
+        features["direction_R2L"] = int(
+            direction == "R2L"
+        )
+
+
+        features["direction_R2R"] = int(
+            direction == "R2R"
+        )
+
+
+        # ====================================================
+        # CLEAN OLD STATE
+        # ====================================================
+
+        self.cleanup(
+
+            destination,
+
+            start
+
+        )
+
+
+        # ====================================================
+        # RETURN FEATURES
+        # ====================================================
 
         return features
 
 
-class DDoSDetector(BaseThreatDetector):
-    """
-    DDoS Threat Detector implementing BaseThreatDetector contract.
-    Loads trained XGBoost model and RobustScaler for inference.
-    """
+# ============================================================
+# DDoS DETECTOR
+# ============================================================
+
+class DDoSDetector:
+
 
     def __init__(
+
         self,
-        model_path: Optional[str] = None,
-        scaler_path: Optional[str] = None,
-        threshold: float = PRODUCTION_THRESHOLD,
-    ) -> None:
-        self.threshold = float(threshold)
-        self.window = DDoSFeatureWindow()
-        self.model: Any = None
-        self.scaler: Any = None
 
-        base_dir = Path(__file__).parent
-        resolved_model_path = model_path or str(base_dir / DEFAULT_MODEL_FILENAME)
-        resolved_scaler_path = scaler_path or str(base_dir / DEFAULT_SCALER_FILENAME)
+        model_path=None,
 
-        self.load_model(resolved_model_path)
-        if Path(resolved_scaler_path).exists():
-            self.scaler = joblib.load(resolved_scaler_path)
+        scaler_path=None,
 
-    @property
-    def metadata(self) -> DetectorMetadata:
-        return DetectorMetadata(
-            name="ddos",
-            version="1.0.0",
-            required_features=FEATURE_NAMES
+        threshold=PRODUCTION_THRESHOLD
+
+    ):
+
+
+        # ----------------------------------------------------
+        # DEFAULT MODEL DIRECTORY
+        # ----------------------------------------------------
+
+        base_dir = Path(
+            __file__
+        ).resolve().parent
+
+
+        if model_path is None:
+
+            model_path = base_dir / (
+                "xgboost_ddos_model.pkl"
+            )
+
+
+        if scaler_path is None:
+
+            scaler_path = base_dir / (
+                "robust_scaler.pkl"
+            )
+
+
+        self.model_path = Path(
+            model_path
         )
 
-    @property
-    def threat_class(self) -> ThreatClass:
-        return ThreatClass(
-            name="VOLUMETRIC_PROTOCOL_DDOS",
-            mitre_tactic="Impact (TA0040)",
-            mitre_technique_id="T1498.001",
-            mitre_technique_name="Direct Network Flood: SYN Flood"
+
+        self.scaler_path = Path(
+            scaler_path
         )
 
-    def load_model(self, model_path: str) -> None:
-        path = Path(model_path)
-        if not path.is_absolute():
-            base_dir = Path(__file__).parent
-            path = base_dir / model_path
 
-        if path.exists():
-            self.model = joblib.load(path)
-            scaler_candidate = path.parent / DEFAULT_SCALER_FILENAME
-            if scaler_candidate.exists():
-                self.scaler = joblib.load(scaler_candidate)
-        else:
-            raise FileNotFoundError(f"Model file not found at: {path}")
+        self.threshold = threshold
 
-    def predict(
-        self,
-        features: Dict[str, Any],
-        context: Dict[str, Any]
-    ) -> Optional[Prediction]:
-        """
-        Run inference on provided feature dictionary matching BaseThreatDetector.
-        """
-        if self.model is None:
-            raise RuntimeError("Model is not loaded.")
 
-        row = [features.get(col, 0.0) for col in FEATURE_NAMES]
-        X = pd.DataFrame([row], columns=FEATURE_NAMES)
+        # ----------------------------------------------------
+        # LOAD MODEL
+        # ----------------------------------------------------
 
-        if self.scaler is not None:
-            X[CONTINUOUS_COLS] = self.scaler.transform(X[CONTINUOUS_COLS])
+        self.model = joblib.load(
+            self.model_path
+        )
 
-        X = X.replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
-        probability = float(self.model.predict_proba(X)[0][1])
+        # ----------------------------------------------------
+        # LOAD SCALER
+        # ----------------------------------------------------
 
-        if probability < self.threshold:
+        self.scaler = joblib.load(
+            self.scaler_path
+        )
+
+
+        # ----------------------------------------------------
+        # CREATE FEATURE WINDOW
+        # ----------------------------------------------------
+
+        self.feature_window = (
+            DDoSFeatureWindow()
+        )
+
+
+    # ========================================================
+    # PREPARE MODEL INPUT
+    # ========================================================
+
+    def prepare_input(self, features):
+
+
+        # ----------------------------------------------------
+        # EXACT FEATURE ORDER
+        # ----------------------------------------------------
+
+        X = pd.DataFrame(
+
+            [[
+
+                features.get(
+                    feature,
+                    0.0
+                )
+
+                for feature
+                in FEATURE_NAMES
+
+            ]],
+
+            columns=FEATURE_NAMES
+
+        )
+
+
+        # ----------------------------------------------------
+        # HANDLE INVALID VALUES
+        # ----------------------------------------------------
+
+        X = X.replace(
+
+            [
+
+                np.inf,
+
+                -np.inf
+
+            ],
+
+            np.nan
+
+        )
+
+
+        X = X.fillna(
+            0.0
+        )
+
+
+        # ----------------------------------------------------
+        # SCALE ONLY 15 CONTINUOUS FEATURES
+        # ----------------------------------------------------
+
+        X[CONTINUOUS_COLS] = (
+
+            self.scaler.transform(
+
+                X[CONTINUOUS_COLS]
+
+            )
+
+        )
+
+
+        return X
+
+
+    # ========================================================
+    # PREDICT
+    # ========================================================
+
+    def predict(self, event):
+
+
+        # ----------------------------------------------------
+        # BUILD 26 FEATURES
+        # ----------------------------------------------------
+
+        features = (
+
+            self.feature_window.build_features(
+                event
+            )
+
+        )
+
+
+        # ----------------------------------------------------
+        # PREPARE INPUT
+        # ----------------------------------------------------
+
+        X = self.prepare_input(
+            features
+        )
+
+
+        # ----------------------------------------------------
+        # MODEL PROBABILITY
+        # ----------------------------------------------------
+
+        probability = float(
+
+            self.model.predict_proba(
+                X
+            )[0][1]
+
+        )
+
+
+        # ----------------------------------------------------
+        # THRESHOLD CHECK
+        # ----------------------------------------------------
+
+        detected = (
+
+            probability >= self.threshold
+
+        )
+
+
+        # ----------------------------------------------------
+        # NO ALERT
+        # ----------------------------------------------------
+
+        if not detected:
+
             return None
 
-        # Severity determination based on confidence
-        if probability >= 0.9:
-            severity = "CRITICAL"
-        elif probability >= 0.7:
-            severity = "HIGH"
-        elif probability >= 0.4:
-            severity = "MEDIUM"
-        else:
-            severity = "LOW"
 
-        # Calculate anomaly z-score heuristic based on confidence and entropy
-        entropy_val = float(features.get("source_ip_entropy_5s", 0.0))
-        pps = float(features.get("packets_per_second", 0.0))
-        anomaly_zscore = round(float(probability * 5.0 + min(entropy_val, 3.0) + min(pps / 10000.0, 2.0)), 2)
+        # ----------------------------------------------------
+        # SEVERITY
+        # ----------------------------------------------------
 
-        evidence = {
-            "packets_per_second": features.get("packets_per_second", 0.0),
-            "bytes_per_second": features.get("bytes_per_second", 0.0),
-            "source_ip_entropy_5s": entropy_val,
-            "unique_source_ips_5s": features.get("unique_source_ips_5s", 0),
-            "syn_ratio": features.get("syn_ratio", 0),
-            "bidirectional_ratio": features.get("bidirectional_ratio", 0.0),
-            "detection_threshold": self.threshold,
-            "raw_confidence": round(probability, 4),
-        }
-
-        return Prediction(
-            threat_class=self.threat_class.name,
-            confidence=round(probability, 4),
-            severity=severity,
-            anomaly_zscore=anomaly_zscore,
-            evidence=evidence
+        severity = get_severity(
+            probability
         )
 
-    def predict_raw_event(self, raw_event: dict) -> Optional[Prediction]:
-        """Convenience method to process raw flow dictionary directly."""
-        features = self.window.build_features(raw_event)
-        context = {
-            "src_ip": raw_event.get("source") or raw_event.get("src_ip", "0.0.0.0"),
-            "dst_ip": raw_event.get("destination") or raw_event.get("dst_ip", "0.0.0.0"),
+
+        # ----------------------------------------------------
+        # EVIDENCE
+        # ----------------------------------------------------
+
+        evidence = {
+
+            "destination":
+
+                event.get(
+                    "destination",
+                    event.get(
+                        "dst_ip"
+                    )
+                ),
+
+
+            "source":
+
+                event.get(
+                    "source",
+                    event.get(
+                        "src_ip"
+                    )
+                ),
+
+
+            "packets_per_second":
+
+                features[
+                    "packets_per_second"
+                ],
+
+
+            "bytes_per_second":
+
+                features[
+                    "bytes_per_second"
+                ],
+
+
+            "unique_source_ips_5s":
+
+                features[
+                    "unique_source_ips_5s"
+                ],
+
+
+            "source_ip_entropy_5s":
+
+                features[
+                    "source_ip_entropy_5s"
+                ],
+
+
+            "flows_30s":
+
+                features[
+                    "flows_30s"
+                ],
+
+
+            "unique_sources_30s":
+
+                features[
+                    "unique_sources_30s"
+                ],
+
+
+            "flows_60s":
+
+                features[
+                    "flows_60s"
+                ],
+
+
+            "unique_sources_60s":
+
+                features[
+                    "unique_sources_60s"
+                ],
+
+
+            "syn_ratio":
+
+                features[
+                    "syn_ratio"
+                ],
+
+
+            "syn_without_data":
+
+                features[
+                    "syn_without_data"
+                ],
+
         }
-        return self.predict(features, context)
+
+
+        # ----------------------------------------------------
+        # RETURN DETECTION RESULT
+        # ----------------------------------------------------
+
+        return {
+
+            "detector":
+
+                "DDoSDetector",
+
+
+            "detected":
+
+                True,
+
+
+            "label":
+
+                "DDoS",
+
+
+            "confidence":
+
+                probability,
+
+
+            "severity":
+
+                severity,
+
+
+            "threshold":
+
+                self.threshold,
+
+
+            "evidence":
+
+                evidence,
+
+        }
+
+
+# ============================================================
+# OPTIONAL TEST
+# ============================================================
+
+if __name__ == "__main__":
+
+    print(
+        "DDoSDetector module loaded successfully."
+    )
