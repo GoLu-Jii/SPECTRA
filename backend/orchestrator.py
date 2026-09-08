@@ -17,6 +17,11 @@ from ml_engine.port_scanning.detector import PortScanDetector
 from ml_engine.DNS_Tunelling.dns_tunnelling_detector import DNSTunnellingDetector
 from backend.dns_tunnelling_pcap import DNSPacket, build_dns_features
 from backend.malware_tls_features import MalwareTLSFeatureAdapter
+from backend.exfiltration_features import (
+    ExfiltrationFeatureAdapter,
+    ExfiltrationFeatureError,
+)
+from ml_engine.exfilteration.deployment import DataExfiltrationDetector
 
 C2BeaconingDetector = importlib.import_module(
     "ml_engine.C2 Beaconing.c2_beaconing_detector"
@@ -48,6 +53,9 @@ class DetectorRegistry:
             return
         if isinstance(detector, MalwareTLSFeatureAdapter):
             self._detectors["malware_tls"] = detector
+            return
+        if isinstance(detector, DataExfiltrationDetector):
+            self._detectors["exfiltration"] = detector
             return
         self._detectors[detector.metadata.name] = detector
 
@@ -249,6 +257,7 @@ class Orchestrator:
         self.window_manager = window_manager or WindowManager()
         self.feature_preparer = feature_preparer or FeaturePreparer()
         self.alert_generator = alert_generator or AlertGenerator()
+        self._exfiltration_adapters: Dict[int, ExfiltrationFeatureAdapter] = {}
 
     def register_detector(
         self,
@@ -345,6 +354,48 @@ class Orchestrator:
                         prediction = self._tls_prediction(detector, window)
                         if prediction:
                             alerts.append(self.alert_generator.generate(prediction, event))
+                    continue
+
+                if isinstance(detector, DataExfiltrationDetector):
+                    try:
+                        adapter = self._exfiltration_adapters.setdefault(
+                            id(detector),
+                            ExfiltrationFeatureAdapter(detector.expected_features),
+                        )
+                        prepared = adapter.prepare(event)
+                        result = detector.predict(prepared.payload)
+                    except ExfiltrationFeatureError:
+                        continue
+                    if not result:
+                        continue
+                    verdict = result[0]
+                    if int(verdict["prediction"]) != 1:
+                        continue
+                    confidence = float(verdict["confidence"])
+                    prediction = Prediction(
+                        threat_class="Data Exfiltration",
+                        confidence=confidence,
+                        severity=self._confidence_severity(confidence),
+                        anomaly_zscore=0.0,
+                        evidence={
+                            "source_ip": event.src_ip,
+                            "destination_ip": event.dst_ip,
+                            "protocol": event.proto,
+                            "duration": event.duration,
+                            "source_bytes": event.orig_bytes,
+                            "destination_bytes": event.resp_bytes,
+                            "source_packets": event.orig_pkts,
+                            "destination_packets": event.resp_pkts,
+                            "exfiltration_probability": confidence,
+                            "threshold": detector.threshold,
+                            "model": "threat_06_unsw_specialized_model",
+                            "target_categories": [
+                                "Backdoor", "Reconnaissance", "Exploits"
+                            ],
+                            "feature_count": len(prepared.feature_names),
+                        },
+                    )
+                    alerts.append(self.alert_generator.generate(prediction, event))
                     continue
 
                 # Add event to window
@@ -457,7 +508,11 @@ class Orchestrator:
         completed_windows = self.window_manager.flush_all()
         for window in completed_windows:
             for detector in self.detector_registry.all():
-                if isinstance(detector, DDoSDetector) or isinstance(detector, DGA_Detector):
+                if (
+                    isinstance(detector, DDoSDetector)
+                    or isinstance(detector, DGA_Detector)
+                    or isinstance(detector, DataExfiltrationDetector)
+                ):
                     continue
                 if isinstance(detector, C2BeaconingDetector):
                     if window.config.detector_name != "c2" or len(window.events) < 2:
