@@ -25,7 +25,10 @@ from ml_engine.ddos.ddo_detector import DDoSDetector
 from ml_engine.DNS_Tunelling.dns_tunnelling_detector import DNSTunnellingDetector
 from ml_engine.mock.detector import MockDetector
 from ml_engine.port_scanning.detector import PortScanDetector
-from ml_engine.exfilteration.deployment import DataExfiltrationDetector
+try:
+    from ml_engine.exfilteration.deployment import DataExfiltrationDetector
+except ModuleNotFoundError:
+    DataExfiltrationDetector = None
 
 C2BeaconingDetector = importlib.import_module(
     "ml_engine.C2 Beaconing.c2_beaconing_detector"
@@ -114,10 +117,11 @@ def build_pipeline(include_mock: bool | None = None):
         PortScanDetector(),
         WindowConfig("recon", "tumbling", 1, ["src_ip"]),
     )
-    orch.register_detector(
-        DataExfiltrationDetector(),
-        WindowConfig("exfiltration", "tumbling", 1, []),
-    )
+    if DataExfiltrationDetector is not None:
+        orch.register_detector(
+            DataExfiltrationDetector(),
+            WindowConfig("exfiltration", "tumbling", 1, []),
+        )
 
     include_mock = ENABLE_MOCK_DETECTOR if include_mock is None else include_mock
     if include_mock:

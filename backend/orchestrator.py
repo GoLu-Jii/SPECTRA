@@ -21,7 +21,10 @@ from backend.exfiltration_features import (
     ExfiltrationFeatureAdapter,
     ExfiltrationFeatureError,
 )
-from ml_engine.exfilteration.deployment import DataExfiltrationDetector
+try:
+    from ml_engine.exfilteration.deployment import DataExfiltrationDetector
+except ModuleNotFoundError:
+    DataExfiltrationDetector = None
 
 C2BeaconingDetector = importlib.import_module(
     "ml_engine.C2 Beaconing.c2_beaconing_detector"
@@ -54,7 +57,9 @@ class DetectorRegistry:
         if isinstance(detector, MalwareTLSFeatureAdapter):
             self._detectors["malware_tls"] = detector
             return
-        if isinstance(detector, DataExfiltrationDetector):
+        if DataExfiltrationDetector is not None and isinstance(
+            detector, DataExfiltrationDetector
+        ):
             self._detectors["exfiltration"] = detector
             return
         self._detectors[detector.metadata.name] = detector
@@ -356,7 +361,9 @@ class Orchestrator:
                             alerts.append(self.alert_generator.generate(prediction, event))
                     continue
 
-                if isinstance(detector, DataExfiltrationDetector):
+                if DataExfiltrationDetector is not None and isinstance(
+                    detector, DataExfiltrationDetector
+                ):
                     try:
                         adapter = self._exfiltration_adapters.setdefault(
                             id(detector),
@@ -511,7 +518,10 @@ class Orchestrator:
                 if (
                     isinstance(detector, DDoSDetector)
                     or isinstance(detector, DGA_Detector)
-                    or isinstance(detector, DataExfiltrationDetector)
+                    or (
+                        DataExfiltrationDetector is not None
+                        and isinstance(detector, DataExfiltrationDetector)
+                    )
                 ):
                     continue
                 if isinstance(detector, C2BeaconingDetector):
