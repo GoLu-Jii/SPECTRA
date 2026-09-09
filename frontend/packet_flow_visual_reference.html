@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>SPECTRA packet-flow visual reference (prototype only)</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/tabler-icons/2.44.0/iconfont/tabler-icons.min.css">
+<style>
+  :root {
+    --surface-0:#0b0d10; --surface-1:#161a1f; --surface-2:#1e242b;
+    --text-primary:#e8ecef; --text-secondary:#9aa4ad; --text-muted:#6b747c;
+    --text-danger:#ff6b6b; --fill-danger:#e5484d; --bg-danger:rgba(229,72,77,0.18);
+    --fill-success:#2fb970; --border:#2a2f36; --font-mono: 'SFMono-Regular', Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { background:var(--surface-0); color:var(--text-primary); font-family: -apple-system, Segoe UI, Roboto, sans-serif; padding:2rem; }
+  .wrap { max-width:680px; margin:0 auto; }
+  button { background:transparent; border:1px solid var(--border); color:var(--text-primary); border-radius:8px; padding:6px 12px; font-size:13px; cursor:pointer; }
+  button:hover { background:var(--surface-2); }
+  input[type=range] { accent-color:#4a90d9; }
+  @keyframes flow { 0% { left: 0%; } 100% { left: 91%; } }
+  .dot { position:absolute; top:50%; width:10px; height:10px; border-radius:50%; transform:translateY(-50%); background:var(--text-muted); transition: background .35s, box-shadow .35s; }
+  .dot.threat-on { background: var(--fill-danger); box-shadow: 0 0 0 4px var(--bg-danger); }
+  .dot.clean-on { background: var(--fill-success); }
+  .alert-row { display:flex; align-items:center; gap:10px; padding:8px 10px; border-radius:8px; background:var(--surface-1); animation: rowIn .3s ease-out; }
+  @keyframes rowIn { from { opacity:0; transform:translateY(-6px);} to { opacity:1; transform:translateY(0);} }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p style="font-size:12px; color:var(--text-danger); border:1px solid var(--text-danger); display:inline-block; padding:4px 10px; border-radius:6px; margin-bottom:1.5rem;">
+    PROTOTYPE / BEHAVIOR REFERENCE ONLY — dot spawning and alert content below are randomly generated for demo purposes. Do not port this random-data logic into production. See notes at the bottom of this file.
+  </p>
+
+  <div style="display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:1.25rem;">
+    <div style="background:var(--surface-1); border-radius:8px; padding:1rem;">
+      <p style="font-size:13px; color:var(--text-secondary); margin:0 0 4px;">Flows scanned</p>
+      <p style="font-size:24px; font-weight:500; margin:0;" id="scanned">0</p>
+    </div>
+    <div style="background:var(--surface-1); border-radius:8px; padding:1rem;">
+      <p style="font-size:13px; color:var(--text-secondary); margin:0 0 4px;">Threats flagged</p>
+      <p style="font-size:24px; font-weight:500; margin:0; color:var(--text-danger);" id="flagged">0</p>
+    </div>
+  </div>
+
+  <div style="position:relative; height:90px; margin-bottom:8px; border-bottom:1px solid var(--border);">
+    <div style="position:absolute; left:0; top:50%; transform:translate(-50%,-50%); text-align:center;">
+      <i class="ti ti-router" style="font-size:20px; color:var(--text-secondary);"></i>
+      <p style="font-size:11px; color:var(--text-muted); margin:4px 0 0;">Traffic</p>
+    </div>
+    <div style="position:absolute; left:32%; top:50%; transform:translate(-50%,-50%); text-align:center;">
+      <i class="ti ti-arrow-bar-right" style="font-size:20px; color:var(--text-secondary);"></i>
+      <p style="font-size:11px; color:var(--text-muted); margin:4px 0 0;">Diode</p>
+    </div>
+    <div style="position:absolute; left:62%; top:50%; transform:translate(-50%,-50%); text-align:center;">
+      <i class="ti ti-cpu" style="font-size:20px; color:var(--text-secondary);"></i>
+      <p style="font-size:11px; color:var(--text-muted); margin:4px 0 0;">Detectors</p>
+    </div>
+    <div style="position:absolute; left:97%; top:50%; transform:translate(-50%,-50%); text-align:center;">
+      <i class="ti ti-layout-dashboard" style="font-size:20px; color:var(--text-secondary);"></i>
+      <p style="font-size:11px; color:var(--text-muted); margin:4px 0 0;">Dashboard</p>
+    </div>
+    <div id="lane" style="position:relative; height:100%;"></div>
+  </div>
+
+  <div style="display:flex; align-items:center; gap:12px; margin:0 0 1.25rem;">
+    <button id="toggle"><i class="ti ti-player-pause" style="font-size:16px; vertical-align:-3px; margin-right:4px;"></i>Pause</button>
+    <label style="font-size:13px; color:var(--text-secondary);">Traffic rate</label>
+    <input type="range" min="1" max="10" value="4" step="1" id="rate" style="flex:1;" />
+    <span style="font-size:13px; min-width:70px;" id="rateOut">4 flows/s</span>
+  </div>
+
+  <p style="font-size:13px; color:var(--text-secondary); margin:0 0 8px;">Live alerts</p>
+  <div id="alerts" style="display:flex; flex-direction:column; gap:6px; min-height:44px;"></div>
+
+  <hr style="border-color:var(--border); margin:2.5rem 0 1.5rem;">
+  <div style="font-size:13px; color:var(--text-secondary); line-height:1.7;">
+    <p style="color:var(--text-primary); font-weight:500;">Notes for the real implementation:</p>
+    <ul>
+      <li>Ambient dot spawn rate here is a fixed slider value. In production, derive spawn rate from the real <code>throughput</code> field returned by <code>GET /stats</code> — do not let the user control it, just reflect reality.</li>
+      <li>The 22% "random threat" chance and the fake threat label/confidence list must be deleted entirely. A dot only flares red when a real alert arrives over <code>/ws</code> (or is loaded from <code>/alerts</code> on initial page load) — one real alert = one flare, never fabricated.</li>
+      <li>Alert row content (label, confidence) must come from the real alert object's <code>threat_classification</code> and <code>confidence</code> fields, per the integration contract — not randomly generated.</li>
+      <li>Clicking a flared dot or its alert-feed row should open the same alert detail panel used elsewhere in the dashboard (fetches <code>GET /alerts/{id}</code>) — don't build a second, separate alert list just for this visual.</li>
+      <li>This file is unstyled relative to the rest of the dashboard (standalone dark palette hardcoded) — restyle using the app's actual Tailwind theme/tokens, not these inline hex values.</li>
+    </ul>
+  </div>
+</div>
+
+<script>
+(function(){
+  var lane = document.getElementById('lane');
+  var alerts = document.getElementById('alerts');
+  var scannedEl = document.getElementById('scanned');
+  var flaggedEl = document.getElementById('flagged');
+  var toggleBtn = document.getElementById('toggle');
+  var rateInput = document.getElementById('rate');
+  var rateOut = document.getElementById('rateOut');
+  var scanned = 0, flagged = 0, running = true, timer = null;
+  var threats = [
+    {label:'DDoS', min:55, max:88},
+    {label:'C2 beacon', min:60, max:92},
+    {label:'DGA domain', min:80, max:99},
+    {label:'Malware TLS', min:65, max:90},
+    {label:'Port scan', min:70, max:96}
+  ];
+
+  function spawn(){
+    var dot = document.createElement('div');
+    dot.className = 'dot';
+    var dur = (3.2 + Math.random()*1.4).toFixed(2);
+    dot.style.animation = 'flow ' + dur + 's linear forwards';
+    lane.appendChild(dot);
+    var isThreat = Math.random() < 0.22;
+    var checkpointDelay = dur * 0.62 * 1000;
+
+    setTimeout(function(){
+      scanned++;
+      scannedEl.textContent = scanned;
+      if (isThreat){
+        dot.classList.add('threat-on');
+        flagged++;
+        flaggedEl.textContent = flagged;
+        var t = threats[Math.floor(Math.random()*threats.length)];
+        var conf = Math.round(t.min + Math.random()*(t.max - t.min));
+        addAlert(t.label, conf);
+      } else {
+        dot.classList.add('clean-on');
+      }
+    }, checkpointDelay);
+
+    setTimeout(function(){ dot.remove(); }, dur*1000 + 50);
+  }
+
+  function addAlert(label, conf){
+    var row = document.createElement('div');
+    row.className = 'alert-row';
+    row.innerHTML = '<i class="ti ti-alert-triangle" style="font-size:16px; color:var(--text-danger);"></i>' +
+      '<span style="font-size:13px; font-weight:500; flex:1;">' + label + '</span>' +
+      '<span style="font-size:12px; font-family:var(--font-mono); color:var(--text-danger);">' + conf + '%</span>';
+    alerts.insertBefore(row, alerts.firstChild);
+    while (alerts.children.length > 4){ alerts.removeChild(alerts.lastChild); }
+  }
+
+  function scheduleLoop(){
+    if (!running) return;
+    spawn();
+    var rate = parseInt(rateInput.value, 10);
+    var interval = 1000 / rate;
+    timer = setTimeout(scheduleLoop, interval);
+  }
+
+  toggleBtn.addEventListener('click', function(){
+    running = !running;
+    if (running){
+      toggleBtn.innerHTML = '<i class="ti ti-player-pause" style="font-size:16px; vertical-align:-3px; margin-right:4px;"></i>Pause';
+      scheduleLoop();
+    } else {
+      toggleBtn.innerHTML = '<i class="ti ti-player-play" style="font-size:16px; vertical-align:-3px; margin-right:4px;"></i>Resume';
+      clearTimeout(timer);
+    }
+  });
+
+  rateInput.addEventListener('input', function(){
+    rateOut.textContent = rateInput.value + ' flows/s';
+  });
+
+  scheduleLoop();
+})();
+</script>
+</body>
+</html>

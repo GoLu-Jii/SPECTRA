@@ -1,0 +1,64 @@
+warning: in the working copy of 'backend/runner.py', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/backend/runner.py b/backend/runner.py[m
+[1mindex 284d2dc..409edb8 100644[m
+[1m--- a/backend/runner.py[m
+[1m+++ b/backend/runner.py[m
+[36m@@ -99,10 +99,18 @@[m [mclass Runner:[m
+     # ------------------------------------------------------------------[m
+     # Ingestion[m
+     # ------------------------------------------------------------------[m
+[31m-    async def feed(self, event: NormalizedEvent) -> None:[m
+[31m-        """Enqueue a single event for live processing (non-blocking)."""[m
+[32m+[m[32m    async def feed([m
+[32m+[m[32m        self,[m
+[32m+[m[32m        event: NormalizedEvent,[m
+[32m+[m[32m        *,[m
+[32m+[m[32m        wait_for_capacity: bool = False,[m
+[32m+[m[32m    ) -> None:[m
+[32m+[m[32m        """Enqueue one event, optionally waiting for replay capacity."""[m
+         self.metrics.events_received += 1[m
+         if not self._accepting or self._queue is None or self._queue.full():[m
+[32m+[m[32m            if wait_for_capacity and self._accepting and self._queue is not None:[m
+[32m+[m[32m                await self._queue.put(event)[m
+[32m+[m[32m                return[m
+             self.metrics.dropped_events += 1[m
+             return[m
+         self._queue.put_nowait(event)[m
+[36m@@ -111,7 +119,7 @@[m [mclass Runner:[m
+         """Replay a list of events; return the number of alerts generated."""[m
+         before = self.metrics.alerts_generated[m
+         for ev in events:[m
+[31m-            await self.feed(ev)[m
+[32m+[m[32m            await self.feed(ev, wait_for_capacity=True)[m
+ [m
+         # Wait for the worker to drain the queue, then flush any windows[m
+         # that never received a triggering "next" event.[m
+[1mdiff --git a/backend/test_streaming_runtime.py b/backend/test_streaming_runtime.py[m
+[1mindex 1703f23..0db55d0 100644[m
+[1m--- a/backend/test_streaming_runtime.py[m
+[1m+++ b/backend/test_streaming_runtime.py[m
+[36m@@ -100,6 +100,24 @@[m [mdef test_incremental_slow_producer_drains_and_records_latency():[m
+     asyncio.run(run_stream())[m
+ [m
+ [m
+[32m+[m[32mdef test_replay_waits_for_queue_capacity_without_drops():[m
+[32m+[m[32m    async def run_replay():[m
+[32m+[m[32m        runner, _, metrics, _ = build_runner(window_size=1)[m
+[32m+[m[32m        runner._max_queue = 1[m
+[32m+[m[32m        events = [make_event(float(index), f"REPLAY-{index}") for index in range(8)][m
+[32m+[m
+[32m+[m[32m        await runner.start()[m
+[32m+[m[32m        try:[m
+[32m+[m[32m            await runner.replay_events(events)[m
+[32m+[m[32m            assert metrics.events_received == len(events)[m
+[32m+[m[32m            assert metrics.events_processed == len(events)[m
+[32m+[m[32m            assert metrics.dropped_events == 0[m
+[32m+[m[32m        finally:[m
+[32m+[m[32m            await runner.stop()[m
+[32m+[m
+[32m+[m[32m    asyncio.run(run_replay())[m
+[32m+[m
+[32m+[m
+ def test_window_boundary_generates_alert_before_stream_ends():[m
+     async def run_stream():[m
+         runner, store, metrics, detector = build_runner(window_size=1)[m
